@@ -1,0 +1,606 @@
+# Bug: Currently we're having some trouble with differentiating between a colab notebook and a .py file, so right now you'll just need to uncomment the below if you're wanting to properly clear your variable state in your colab notebook each time.
+"""
+# If we are in an ipython session or a notebook, clear the state to avoid bugs
+try:
+  _ = get_ipython().__class__.__name__
+  ## we set -f below to avoid prompting the user before clearing the notebook state
+  %reset -f
+except NameError:
+  pass ## we're still good
+"""
+import functools
+from functools import partial
+import os
+import copy
+
+import torch
+import torch.nn.functional as F
+from torch import nn
+
+import rich
+from rich.live import Live
+from rich.progress import Progress, Console, track
+from rich.table import Table
+
+import torchvision
+from torchvision import transforms
+
+## <-- teaching comments
+# <-- functional comments
+# You can run 'sed -i.bak '/\#\#/d' ./main.py' to remove the teaching comments if they are in the way of your work. <3
+
+# This can go either way in terms of actually being helpful when it comes to execution speed.
+# torch.backends.cudnn.benchmark = True
+
+# This code was built from the ground up to be directly hackable and to support rapid experimentation, which is something you might see
+# reflected in what would otherwise seem to be odd design decisions. It also means that maybe some cleaning up is required before moving
+# to production if you're going to use this code as such (such as breaking different section into unique files, etc). That said, if there's
+# ways this code could be improved and cleaned up, please do open a PR on the GitHub repo. Your support and help is much appreciated for this
+# project! :)
+
+# set global defaults (in this particular file) for convolutions
+default_conv_kwargs = {'kernel_size': 3, 'padding': 'same', 'bias': False}
+
+batchsize = 512
+bias_scaler = 64
+hyp = {
+    'opt': {
+        'bias_lr':        1. * bias_scaler/batchsize, # TODO: How we're expressing this information feels somewhat clunky, is there maybe a better way to do this? :'))))
+        'non_bias_lr':    1. / batchsize,
+        'bias_decay':     5e-4 * batchsize/bias_scaler,
+        'non_bias_decay': 5e-4 * batchsize,
+        'scaling_factor': 1./16,
+        'percent_start': .2,
+    },
+    'net': {
+        'whitening': {
+            'kernel_size': 3,
+            'num_examples': 10000,
+        },
+        'ghost_norm_group_size': 64, ## Regularization
+        'cutout_size': 0,
+        'pad_amount': 4,
+    },
+    'misc': {
+        'ema': {
+            'epochs': 2,
+            'decay_base': .99,
+            'every_n_steps': 5,
+        },
+        'train_epochs': 10,
+        'device': 'cuda',
+        'data_location': 'data.pt',
+    }
+}
+
+#############################################
+#                Dataloader                 #
+#############################################
+
+if not os.path.exists(hyp['misc']['data_location']):
+        cifar10_mean, cifar10_std = [
+            torch.tensor([0.4913997551666284, 0.48215855929893703, 0.4465309133731618], device=hyp['misc']['device']),
+            torch.tensor([0.24703225141799082, 0.24348516474564, 0.26158783926049628],  device=hyp['misc']['device'])
+        ]
+
+        transform = transforms.Compose([
+            transforms.ToTensor()])
+
+        cifar10      = torchvision.datasets.CIFAR10('cifar10/', download=True,  train=True,  transform=transform)
+        cifar10_eval = torchvision.datasets.CIFAR10('cifar10/', download=False, train=False, transform=transform)
+
+        # use the dataloader to get a single batch of all of the dataset items at once.
+        train_dataset_gpu_loader = torch.utils.data.DataLoader(cifar10, batch_size=len(cifar10), drop_last=True,
+                                                  shuffle=True, num_workers=2, persistent_workers=False)
+        eval_dataset_gpu_loader = torch.utils.data.DataLoader(cifar10_eval, batch_size=len(cifar10_eval), drop_last=True,
+                                                  shuffle=False, num_workers=1, persistent_workers=False)
+
+        train_dataset_gpu = {}
+        eval_dataset_gpu = {}
+
+        train_dataset_gpu['images'], train_dataset_gpu['targets'] = [item.to(device=hyp['misc']['device'], non_blocking=True) for item in next(iter(train_dataset_gpu_loader))]
+        eval_dataset_gpu['images'],  eval_dataset_gpu['targets']  = [item.to(device=hyp['misc']['device'], non_blocking=True) for item in next(iter(eval_dataset_gpu_loader)) ]
+
+        def batch_normalize_images(input_images, mean, std):
+            return (input_images - mean.view(1, -1, 1, 1)) / std.view(1, -1, 1, 1)
+
+        # preload with our mean and std
+        batch_normalize_images = partial(batch_normalize_images, mean=cifar10_mean, std=cifar10_std)
+
+        ## Batch normalize datasets, now. Wowie. We did it! We should take a break and make some tea now.
+        train_dataset_gpu['images'] = batch_normalize_images(train_dataset_gpu['images'])
+        eval_dataset_gpu['images']  = batch_normalize_images(eval_dataset_gpu['images'])
+
+        data = {
+            'train': train_dataset_gpu,
+            'eval': eval_dataset_gpu
+        }
+
+        ## Convert dataset to FP16 now for the rest of the process....
+        data['train']['images'] = data['train']['images'].half()
+        data['eval']['images']  = data['eval']['images'].half()
+
+        torch.save(data, hyp['misc']['data_location'])
+
+else:
+    ## This is effectively instantaneous, and takes us practically straight to where the dataloader-loaded dataset would be. :)
+    ## So as long as you run the above loading process once, and keep the file on the disc it's specified by default in the above
+    ## hyp dictionary, then we should be good. :)
+    data = torch.load(hyp['misc']['data_location'])
+
+## As you'll note above and below, one difference is that we don't count loading the raw data to GPU since it's such a variable operation, and can sort of get in the way
+## of measuring other things. That said, measuring the preprocessing (outside of the padding) is still important to us.
+
+# Pad the GPU training dataset
+if hyp['net']['pad_amount'] > 0:
+    ## Uncomfortable shorthand, but basically we pad evenly on all _4_ sides with the pad_amount specified in the original dictionary
+    data['train']['images'] = F.pad(data['train']['images'], (hyp['net']['pad_amount'],)*4, 'reflect')
+
+#############################################
+#            Network Components             #
+#############################################
+
+# We might be able to fuse this weight and save some memory/runtime/etc, since the fast version of the network doesn't need it I thinks...
+class BatchNorm(nn.BatchNorm2d):
+    def __init__(self, num_features, eps=1e-05, momentum=0.1, weight=False, bias=True):
+        super().__init__(num_features, eps=eps, momentum=momentum)
+        self.weight.data.fill_(1.0)
+        self.bias.data.fill_(0.0)
+        self.weight.requires_grad = weight
+        self.bias.requires_grad = bias
+
+class GhostNorm(BatchNorm):
+    def __init__(self, num_features, num_splits=batchsize//hyp['net']['ghost_norm_group_size'], **kw):
+        super().__init__(num_features, **kw)
+        self.num_splits = num_splits
+        self.register_buffer('running_mean', torch.zeros(num_features*self.num_splits))
+        self.register_buffer('running_var', torch.ones(num_features*self.num_splits))
+
+    def train(self, mode=True):
+        if (self.training is True) and (mode is False): #lazily collate stats when we are going to use them, i.e., when we switch from the 'train' to 'eval' modes
+            self.running_mean = torch.mean(self.running_mean.view(self.num_splits, self.num_features), dim=0).repeat(self.num_splits)
+            self.running_var = torch.mean(self.running_var.view(self.num_splits, self.num_features), dim=0).repeat(self.num_splits)
+        return super().train(mode)
+
+    def forward(self, input):
+        N, C, H, W = input.shape
+        if self.training or not self.track_running_stats:
+            return torch.nn.functional.batch_norm(
+                input.view(-1, C*self.num_splits, H, W), self.running_mean, self.running_var, 
+                self.weight.repeat(self.num_splits), self.bias.repeat(self.num_splits),
+                True, self.momentum, self.eps).view(N, C, H, W) 
+        else:
+            return torch.nn.functional.batch_norm(
+                input, self.running_mean[:self.num_features], self.running_var[:self.num_features], 
+                self.weight, self.bias, False, self.momentum, self.eps)
+
+# Allows us to set default arguments for the whole convolution itself.
+class Conv(nn.Conv2d):
+    def __init__(self, *args, **kwargs):
+        kwargs = {**default_conv_kwargs, **kwargs}
+        super().__init__(*args, **kwargs)
+        self.kwargs = kwargs
+
+
+# can hack any changes to each residual group that you want directly in here
+class ConvGroup(nn.Module):
+    def __init__(self, channels_in, channels_out, residual, short, pool):
+        super().__init__()
+        self.short = short
+        self.pool = pool # todo: we can condense this later
+
+        self.residual = residual
+        self.channels_in = channels_in
+        self.channels_out = channels_out
+
+        self.conv1 = Conv(channels_in, channels_out)
+        self.pool1 = nn.MaxPool2d(2)
+        self.norm1 = GhostNorm(channels_out)
+        self.activ = nn.CELU(alpha=.3)            
+
+        # note: this has to be flat if we're jitting things.... we just might burn a bit of extra GPU mem if so
+        if not short:
+            self.conv2 = Conv(channels_out, channels_out)
+            self.conv3 = Conv(channels_out, channels_out)
+            self.norm2 = GhostNorm(channels_out)
+            self.norm3 = GhostNorm(channels_out)
+
+
+    def forward(self, x):
+        x = self.conv1(x)
+        if self.pool:
+            x = self.pool1(x)
+        x = self.norm1(x)
+        x = self.activ(x)
+        if self.short: # layer 2 doesn't necessarily need the residual, so we just return it.
+            return x
+        residual = x
+        x = self.conv2(x)
+        x = self.norm2(x)
+        x = self.activ(x)
+        x = self.conv3(x)
+        x = self.norm3(x)
+        x = self.activ(x)
+        x =  x + residual # haiku
+
+        return x
+
+# Set to 1 for now just to debug a few things....
+class TemperatureScaler(nn.Module):
+    def __init__(self, init_val):
+        super().__init__()
+        self.scaler = torch.tensor(init_val)
+
+    def forward(self, x):
+        x.float() ## save precision for the gradients in the backwards pass
+                  ## I personally believe from experience that this is important
+                  ## for a few reasons. I believe this is the main functional difference between
+                  ## my implementation, and David's implementation...
+        return x.mul(self.scaler)
+
+#############################################
+#          Init Helper Functions            #
+#############################################
+
+def get_patches(x, patch_shape=(3, 3), dtype=torch.float32):
+    # TODO: Annotate
+    c, (h, w) = x.shape[1], patch_shape
+    return x.unfold(2,h,1).unfold(3,w,1).transpose(1,3).reshape(-1,c,h,w).to(dtype) # TODO: Annotate?
+
+def get_whitening_parameters(patches):
+    # TODO: Let's annotate this, please! :'D / D':
+    n,c,h,w = patches.shape
+    est_covariance = torch.cov(patches.view(n, c*h*w).t())
+    eigenvalues, eigenvectors = torch.linalg.eigh(est_covariance, UPLO='U') # this is the same as saying we want our eigenvectors, with the specification that the matrix be an upper triangular matrix (instead of a lower-triangular matrix)
+    return eigenvalues.flip(0).view(-1, 1, 1, 1), eigenvectors.t().reshape(c*h*w,c,h,w).flip(0)
+
+# Run this over the training set to calculate the patch statistics, then set the initial convolution as a non-learnable 'whitening' layer
+def init_whitening_conv(layer, train_set=None, num_examples=None, previous_block_data=None, pad_amount=None):
+    if train_set is not None and previous_block_data is None:
+        if pad_amount > 0:
+            previous_block_data = train_set[:num_examples,:,pad_amount:-pad_amount,pad_amount:-pad_amount] # if it's none, we're at the beginning of our network.
+        else:
+            previous_block_data = train_set[:num_examples,:,:,:]
+
+    eigenvalues, eigenvectors = get_whitening_parameters(get_patches(previous_block_data, patch_shape=layer.weight.data.shape[2:])) # center crop to remove padding
+    # for some reason, the eigenvalues and eigenvectors seem to come out all in float32 for this? ! ?! ?!?!?!? :'(((( </3
+    set_whitening_conv(layer, eigenvalues.to(dtype=layer.weight.dtype), eigenvectors.to(dtype=layer.weight.dtype))
+    data = layer(previous_block_data.to(dtype=layer.weight.dtype))
+    return data
+
+def set_whitening_conv(conv_layer, eigenvalues, eigenvectors, eps=1e-2):
+    shape = conv_layer.weight.data.shape
+    conv_layer.weight.data = (eigenvectors/torch.sqrt(eigenvalues+eps))[-shape[0]:, :, :, :]
+    ## We don't want to train this, since this is implicitly whitening over the whole dataset
+    ## For more info, see [that one whitening paper here] or [link to the original blogpost by David Page here]
+    conv_layer.weight.requires_grad = False
+
+
+#############################################
+#            Network Definition             #
+#############################################
+
+scaler = 2. ## You can play with this on your own if you want, for the first beta I wanted to keep things simple (for now) and leave it out of the hyperparams dict
+depths = {
+    'init':   round(scaler**0*64), # 64  w/ scaler at base value
+    'block1': round(scaler**1*64), # 128 w/ scaler at base value
+    'block2': round(scaler**2*64), # 256 w/ scaler at base value
+    'block3': round(scaler**3*64), # 512 w/ scaler at base value
+    'num_classes': 10
+}
+
+class SpeedyResNet(nn.Module):
+    def __init__(self, network_dict):
+        super().__init__()
+        self.net_dict = network_dict # flexible, defined in the make_network function
+
+    # This allows you to customize/change the execution order of the network as needed.
+    def forward(self, x):
+        if not self.training:
+            x = torch.cat((x, torch.flip(x, (-1,))))
+        x = self.net_dict['initial_block']['whiten'](x)
+        x = self.net_dict['initial_block']['project'](x)
+        x = self.net_dict['initial_block']['norm'](x)
+        x = self.net_dict['initial_block']['activation'](x)
+        x = self.net_dict['residual1'](x)
+        x = self.net_dict['residual2'](x)
+        x = self.net_dict['residual3'](x)
+        x = self.net_dict['pooling'](x)
+        x = self.net_dict['reshape'](x)
+        x = self.net_dict['linear'](x)
+        x = self.net_dict['temperature'](x)
+        if not self.training:
+            # Average the predictions from the lr-flipped inputs during eval
+            orig, flipped = x.split(x.shape[0]//2, dim=0)
+            x = .5 * orig + .5 * flipped
+        return x
+
+def make_net():
+    # TODO: A way to make this cleaner??
+    # Note, you have to specify any arguments overlapping with defaults (i.e. everything but in/out depths) as kwargs so that they are properly overridden (TODO cleanup somehow?)
+    whiten_conv_depth = 3*hyp['net']['whitening']['kernel_size']**2
+    network_dict = nn.ModuleDict({
+        'initial_block': nn.ModuleDict({
+            'whiten': Conv(3, whiten_conv_depth, kernel_size=hyp['net']['whitening']['kernel_size']),
+            'project': Conv(whiten_conv_depth, depths['init'], kernel_size=1),
+            'norm': GhostNorm(depths['init'], weight=False),
+            'activation': nn.CELU(alpha=.3),
+        }),
+        'residual1': ConvGroup(depths['init'], depths['block1'], residual=True, short=False, pool=True),
+        'residual2': ConvGroup(depths['block1'], depths['block2'], residual=True, short=True, pool=True),
+        'residual3': ConvGroup(depths['block2'], depths['block3'], residual=True, short=False, pool=True),
+        'pooling': nn.AdaptiveMaxPool2d((1, 1)),
+        'reshape': nn.Flatten(),
+        'linear': nn.Linear(depths['block3'], depths['num_classes'], bias=False),
+        'temperature': TemperatureScaler(hyp['opt']['scaling_factor'])
+    })
+
+    net = SpeedyResNet(network_dict)
+    net = net.to(hyp['misc']['device'])
+    net.train()
+    net.half() # Convert network to half before initializing the initial whitening layer.
+
+    ## Initialize the whitening convolution
+    with torch.no_grad():
+        # Initialize the first layer to be fixed weights that whiten the expected input values of the network be on the unit hypersphere. (i.e. their vector length is 1., IIRC)
+        init_whitening_conv(net.net_dict['initial_block']['whiten'],
+                            data['train']['images'].index_select(0, torch.randperm(data['train']['images'].shape[0], device=data['train']['images'].device)),
+                            num_examples=hyp['net']['whitening']['num_examples'],
+                            pad_amount=hyp['net']['pad_amount'])
+
+    return net
+
+#############################################
+#            Data Preprocessing             #
+#############################################
+
+## This is actually (I believe) a pretty clean implementation of how to do something like this, since shifted-square masks unique to each depth-channel can actually be rather
+## tricky in practice. That said, if there's a better way, please do feel free to submit it! This can be one of the harder parts of the code to understand (though I personally get
+## stuck on the fold/unfold process for the lower-level convolution calculations.
+def make_random_square_masks(inputs, mask_size):
+    ##### TODO: Double check that this properly covers the whole range of values. :'( :')
+    if mask_size == 0:
+        return None # no need to cutout or do anything like that since the patch_size is set to 0
+    is_even = int(mask_size % 2 == 0)
+    in_shape = inputs.shape
+
+    # seed centers of squares to cutout boxes from, in one dimension each
+    mask_center_y = torch.empty(in_shape[0], dtype=torch.long, device=inputs.device).random_(mask_size//2-is_even, in_shape[-2]-mask_size//2-is_even)
+    mask_center_x = torch.empty(in_shape[0], dtype=torch.long, device=inputs.device).random_(mask_size//2-is_even, in_shape[-1]-mask_size//2-is_even)
+
+    # measure distance, using the center as a reference point
+    to_mask_y_dists = torch.arange(in_shape[-2], device=inputs.device).view(1, 1, in_shape[-2], 1) - mask_center_y.view(-1, 1, 1, 1)
+    to_mask_x_dists = torch.arange(in_shape[-1], device=inputs.device).view(1, 1, 1, in_shape[-1]) - mask_center_x.view(-1, 1, 1, 1)
+
+    to_mask_y = (to_mask_y_dists >= (-(mask_size // 2) + is_even)) * (to_mask_y_dists <= mask_size // 2)
+    to_mask_x = (to_mask_x_dists >= (-(mask_size // 2) + is_even)) * (to_mask_x_dists <= mask_size // 2)
+
+    final_mask = to_mask_y * to_mask_x ## Turn (y by 1) and (x by 1) boolean masks into (y by x) masks through multiplication. Their intersection is square, hurray! :D
+
+    return final_mask
+
+def batch_cutout(inputs, patch_size):
+    with torch.no_grad():
+        cutout_batch_mask = make_random_square_masks(inputs, patch_size)
+        if cutout_batch_mask is None:
+            return inputs # if the mask is None, then that's because the patch size was set to 0 and we will not be using cutout today.
+        # TODO: Could be fused with the crop operation for sheer speeeeeds. :D <3 :))))
+        cutout_batch = torch.where(cutout_batch_mask, torch.zeros_like(inputs), inputs)
+        return cutout_batch
+
+def batch_crop(inputs, crop_size):
+    with torch.no_grad():
+        crop_mask_batch = make_random_square_masks(inputs, crop_size)
+        cropped_batch = torch.masked_select(inputs, crop_mask_batch).view(inputs.shape[0], inputs.shape[1], crop_size, crop_size)
+        return cropped_batch
+
+def batch_flip_lr(batch_images, flip_chance=.5):
+    with torch.no_grad():
+        # TODO: More elegant way to do this? :') :'((((
+        return torch.where(torch.rand_like(batch_images[:, 0, 0, 0].view(-1, 1, 1, 1)) < flip_chance, torch.flip(batch_images, (-1,)), batch_images)
+
+
+########################################
+#          Training Helpers            #
+########################################
+
+class NetworkEMA(nn.Module):
+    def __init__(self, net, decay):
+        super().__init__() # init the parent module so this module is registered properly
+        self.net_ema = copy.deepcopy(net).eval().requires_grad_(False) # copy the model
+        self.decay = decay ## you can update/hack this as necessary for update scheduling purposes :3
+
+    def update(self, current_net):
+        with torch.no_grad():
+            for ema_net_parameter, incoming_net_parameter in zip(self.net_ema.state_dict().values(), current_net.state_dict().values()): # potential bug: assumes that the network architectures don't change during training (!!!!)
+                if incoming_net_parameter.dtype in (torch.half, torch.float):
+                    ema_net_parameter.mul_(self.decay).add_(incoming_net_parameter.detach().mul(1. - self.decay)) # update the ema values in place, similar to how optimizer momentum is coded
+
+    def forward(self, inputs):
+        with torch.no_grad():
+            return self.net_ema(inputs)
+
+# TODO: Can we jit this in the (more distant) future? :)
+def get_batches(data_dict, key, batchsize):
+    num_epoch_examples = len(data_dict[key]['images'])
+    shuffled = torch.randperm(num_epoch_examples, device='cuda')
+    
+    ## Here, we prep the dataset by applying all data augmentations in batches ahead of time before each epoch, then we return an iterator below
+    ## that iterates in chunks over with a random derangement (i.e. shuffled indices) of the individual examples. So we get perfectly-shuffled
+    ## batches (which skip the last batch if it's not a full batch), but everything seems to be (and hopefully is! :D) properly shuffled. :)
+    if key == 'train':
+        images = batch_crop(data_dict[key]['images'], 32) # TODO: hardcoded image size for now?
+        images = batch_flip_lr(images)
+        images = batch_cutout(images, patch_size=hyp['net']['cutout_size'])
+    else:
+        images = data_dict[key]['images']
+
+    for idx in range(num_epoch_examples // batchsize):
+        if not (idx+1)*batchsize > num_epoch_examples: ## Use the shuffled randperm to assemble individual items into a minibatch
+            yield images.index_select(0, shuffled[idx*batchsize:(idx+1)*batchsize]), \
+                  data_dict[key]['targets'].index_select(0, shuffled[idx*batchsize:(idx+1)*batchsize]) ## Each item is only used/accessed by the network once per epoch. :D
+
+
+def init_split_parameter_dictionaries(network):
+    params_non_bias = {'params': [], 'lr': hyp['opt']['non_bias_lr'], 'momentum': .9, 'nesterov': True, 'weight_decay': hyp['opt']['non_bias_decay']}
+    params_bias     = {'params': [], 'lr': hyp['opt']['bias_lr'],     'momentum': .9, 'nesterov': True, 'weight_decay': hyp['opt']['bias_decay']}
+
+    for name, p in network.named_parameters():
+        if p.requires_grad:
+            if 'bias' in name:
+                params_bias['params'].append(p)
+            else:
+                params_non_bias['params'].append(p)
+    return params_non_bias, params_bias
+
+
+## Hey look, it's the soft-targets/label-smoothed loss! Native to PyTorch. Now, _that_ is pretty cool, and simplifies things a lot, to boot! :D :)
+loss_fn = nn.CrossEntropyLoss(label_smoothing=0.2, reduction='none')
+
+console = Console()
+progress_bar = Progress()
+progress_table = Table()
+for column_name in ['epoch', 'train_loss', 'val_loss', 'train_acc', 'val_acc', 'val_ema_acc', 'timing (s)']:
+    progress_table.add_column(column_name)
+
+########################################
+#           Train and Eval             #
+########################################
+
+# to do cast to fp16 precision for training
+def main():
+    # Initializing constants for the whole run.
+    net_ema = None ## Reset any existing network emas, we want to have _something_ to check for existence so we can initialize the EMA right from where the network is during training
+                  ## (as opposed to initializing the network_ema from the randomly-initialized starter network, then forcing it to play catch-up all of a sudden in the last several epochs)
+
+    total_time = 0.
+    current_steps = 0.
+    
+    # TODO: Doesn't currently account for partial epochs really (since we're not doing "real" epochs across the whole batchsize)....
+    num_steps_per_epoch      = len(data['train']['images']) // batchsize # todo: a tad bit of cleanup here. :) :>
+    total_train_steps        = num_steps_per_epoch * hyp['misc']['train_epochs']
+    ema_epoch_start          = hyp['misc']['train_epochs'] - hyp['misc']['ema']['epochs']
+    num_low_lr_steps_for_ema = hyp['misc']['ema']['epochs'] * num_steps_per_epoch
+    ## TODO: (check? <# :)))) ) I believe this wasn't logged, but the EMA update power is adjusted by being raised to the power of the number of "every n" steps
+    ## to somewhat accomodate for whatever the expected information intake rate is. The tradeoff I believe, though, is that this is to some degree noisier as we
+    ## are intaking fewer samples of our distribution-over-time, with a higher individual weight each.
+    projected_ema_decay_val  = hyp['misc']['ema']['decay_base'] ** hyp['misc']['ema']['every_n_steps']
+
+    # Adjust pct_start based upon how many epochs we need to finetune the ema at a low lr for
+    pct_start = hyp['opt']['percent_start'] * (total_train_steps/(total_train_steps - num_low_lr_steps_for_ema))
+
+    # Get network
+    net = make_net()
+
+    ## Stowing the creation of these into a helper function to make things a bit more readable....
+    non_bias_params, bias_params = init_split_parameter_dictionaries(net)
+
+    # One optimizer for the regular network, and one for the biases. This allows us to use the superconvergence onecycle training policy for our networks....
+    opt = torch.optim.SGD(**non_bias_params)
+    opt_bias = torch.optim.SGD(**bias_params)
+
+    ## Not the most intuitive, but this basically takes us from ~0 to max_lr at the point pct_start, then down to .1 * max_lr at the end (since 1e16 * 1e-15 = .1 --
+    ##   This quirk is because the final lr value is calculated from the starting lr value and not from the maximum lr value set during training)
+    initial_div_factor = 1e16 # basically to make the initial lr ~0 or so :D
+    final_lr_ratio = .1
+    lr_sched      = torch.optim.lr_scheduler.OneCycleLR(opt,  max_lr=non_bias_params['lr'], pct_start=pct_start, div_factor=initial_div_factor, final_div_factor=1./(initial_div_factor*final_lr_ratio), total_steps=total_train_steps-num_low_lr_steps_for_ema, anneal_strategy='linear', cycle_momentum=False)
+    lr_sched_bias = torch.optim.lr_scheduler.OneCycleLR(opt_bias, max_lr=bias_params['lr'], pct_start=pct_start, div_factor=initial_div_factor, final_div_factor=1./(initial_div_factor*final_lr_ratio), total_steps=total_train_steps-num_low_lr_steps_for_ema, anneal_strategy='linear', cycle_momentum=False)
+
+
+    ## For accurately timing GPU code
+    starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+    ## There's another repository that's mainly reorganized David's code while still maintaining some of the functional structure, and it
+    ## has a timing feature too, but there's no synchronizes so I suspect the times reported are much faster than they may be in actuality
+    ## due to some of the quirks of timing GPU operations.
+    torch.cuda.synchronize() ## clean up any pre-net setup operations
+    
+    # Hack -- disabling the below until we figure out how to properly nest these tables during training.
+    #with Live(progress_table, refresh_per_second=1):
+    if True:
+        for epoch in track(range(hyp['misc']['train_epochs'])):
+          #################
+          # Training Mode #
+          #################
+          torch.cuda.synchronize()
+          starter.record()
+          net.train()
+
+          loss_train = None
+          accuracy_train = None
+
+          for epoch_step, (inputs, targets) in enumerate(get_batches(data, key='train', batchsize=batchsize)):
+              ## Run everything through the network
+              outputs = net(inputs)
+
+
+              ## If you want to add other losses or hack around with the loss, you can do that here.
+              loss = loss_fn(outputs, targets).sum() ## Note, as noted in the original blog posts, the summing here does a kind of loss scaling
+                                                     ## (and is thus batchsize dependent as a result). This can be somewhat good or bad, depending...
+
+              # we only take the last-saved accs and losses from train
+              if epoch_step % 50 == 0:
+                  accuracy_train = (outputs.detach().argmax(-1) == targets).float().mean().item()
+                  loss_train = loss.cpu().item()/batchsize
+
+              loss.backward()
+
+              ## Step for each optimizer, in turn.
+              opt.step()
+              opt_bias.step()
+
+              if current_steps < total_train_steps - num_low_lr_steps_for_ema - 1: # the '-1' is because the lr scheduler tends to overshoot (even below 0 if the final lr is ~0) on the last step for some reason.
+                  # We only want to step the lr_schedulers while we have training steps to consume. Otherwise we get a not-so-friendly error from PyTorch
+                  lr_sched.step()
+                  lr_sched_bias.step()
+              
+              ## Using 'set_to_none' I believe is slightly faster (albeit riskier w/ funky gradient update workflows) than under the default 'set to zero' method
+              opt.zero_grad(set_to_none=True)
+              opt_bias.zero_grad(set_to_none=True)
+
+              current_steps += 1
+
+              if epoch >= ema_epoch_start and current_steps % hyp['misc']['ema']['every_n_steps'] == 0:          
+                  ## Initialize the ema from the network at this point in time if it does not already exist.... :D
+                  if net_ema is None:
+                      net_ema = NetworkEMA(net, decay=projected_ema_decay_val)
+                  net_ema.update(net)
+
+          ender.record()
+          torch.cuda.synchronize()
+          total_time += 1e-3 * starter.elapsed_time(ender)
+
+          ####################
+          # Evaluation  Mode #
+          ####################
+          net.eval()
+
+          eval_batchsize = 1000
+          assert data['eval']['images'].shape[0] % eval_batchsize == 0, "Error: The eval batchsize must evenly divide the eval dataset (for now, we don't have drop_remainder implemented yet)."
+          loss_list_val, acc_list, acc_list_ema = [], [], []
+          
+          with torch.no_grad():
+              # TODO: Copy is probably slow, we can def avoid this I think....
+              for inputs, targets in get_batches(data, key='eval', batchsize=eval_batchsize):
+                  if epoch >= ema_epoch_start:
+                          outputs = net_ema(inputs)
+                          acc_list_ema.append((outputs.argmax(-1) == targets).float().mean())
+                  outputs = net(inputs)
+                  loss_list_val.append(loss_fn(outputs, targets).float().mean())
+                  acc_list.append((outputs.argmax(-1) == targets).float().mean())
+                  
+              accuracy_non_ema = torch.stack(acc_list).mean().item()
+              accuracy_ema = None
+              # TODO: We can fuse these two operations (just above and below) all-together like :D :))))
+              if epoch >= ema_epoch_start:
+                  accuracy_ema = torch.stack(acc_list_ema).mean().item()
+
+              loss_val = torch.stack(loss_list_val).mean().item()
+
+          format_for_table = lambda x: "{0:.4f}".format(x) if x is not None else None
+          progress_table.add_row(*list(map(format_for_table, [epoch, loss_train, loss_val, accuracy_train, accuracy_non_ema, accuracy_ema, total_time])))
+          #progress_bar.advance() ## Now that we've finish everything, we update our eta (and we do it last so the ETA is more accurate.)
+          console.print(progress_table)
+
+if __name__ == "__main__":
+    for run_num in range(5):
+        main()
