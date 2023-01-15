@@ -1,5 +1,2 @@
 torch
 torchvision
-numpy
-ipython
-rich
