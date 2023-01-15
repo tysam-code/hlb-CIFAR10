@@ -15,20 +15,23 @@ If you're curious, this code is generally Colab friendly (in fact -- most of thi
 
 Goals: 
 
-* minimalistic 
-* beginner-friendly 
-* torch- and python-idiomatic 
+* minimalistic
+* beginner-friendly
+* torch- and python-idiomatic
 * hackable 
-* near world-record single-GPU training time (~<18.1 seconds on an A100) . 
+* few external dependencies (currently only torch and torchvision)
+* near world-record single-GPU training time (~<12.38 seconds on an A100, the current world record, down from ~18.1 seconds originally). 
 * <2 seconds training time in <2 years 
 
-This is a neural network implementation that painstakingly reproduces from nearly the ground-up a hacking-friendly version of [David Page's original ultra-fast CIFAR-10 implementation on a single GPU](https://myrtle.ai/learn/how-to-train-your-resnet/) -- 94% accuracy in ~<18.1 seconds on an A100 GPU. There is only one primary functional difference that I am aware of. The intended structure of the code is a flat structure intended for quick hacking in practically _any_ (!!!) stage of the training pipeline. This code took about 120-130 hours of work from start to finish, and about about 80-90+ of those hours were mind-numbingly tedious debugging of performance differences between my work David's original work. It was somewhat surprising in places which things really mattered, and which did not. To that end, I found it very educational to write (and may do a writeup someday if enough people and I have enough interest in it). 
+This is a neural network implementation that started from a painstaking reproduction from nearly the ground-up a hacking-friendly version of [David Page's original ultra-fast CIFAR-10 implementation on a single GPU](https://myrtle.ai/learn/how-to-train-your-resnet/). This repository is meant to function primarily as a very human-friendly researcher's toolbench first, a benchmark a close second (ironically currently holding the world record), and a learning codebase third. We're now in the stage where the real fun begins -- the journey to <2 seconds. Some of the early progress was surprisingly easy, but it will likely get pretty crazy as we get closer and closer to our goal.
+
+This code took about 120-130 hours of work during the initial write from start to finish, about 80-90+ of which were mind-numbingly tedious debugging. Some strange things seem to really matter for performance (speed and accuracy), and some strangely do not seem to. To that end, I found it very educational to create (and may do a writeup someday if enough people and I have enough interest in it). 
 
 
-I built this because I loved David's work but found it difficult for my quick-experiment-and-hacking usecases. As a complement to his work, this code is in a single file and extremely flat, but is not as durable for long-term production-level bug maintenance. You're meant to check out a fresh repo whenever you have a new idea. The upside for me in this repository is that I've already been able to explore a wide variety of ideas rapidly, some of which already improve over the baseline (hopefully more of that in future releases). I truly enjoy personally using this code, and hope you do as well! :D Please let me know if you have any feedback. I hope to continue publishing updates to this in the future, but for now, this is a (relatively) accurate baseline.
+I built this because I loved David's work but his code was difficult for my quick-experiment-and-hacking usecases. This code is in a single file and extremely flat, but is not as durable for long-term production-level bug maintenance. You're meant to check out a fresh repo whenever you have a new idea. It is excellent for rapid idea exploring -- almost everywhere in the pipeline is exposed and built to not be user-hostile. I truly enjoy personally using this code, and hope you do as well! :D Please let me know if you have any feedback. I hope to continue publishing updates to this in the future, so your support through word of mouth or otherwise is especially encouraged.
 
 
-Your support helps a lot -- even if it's a dollar as month. I have several more projects I'm in various stages on, and you can help me have the money and time to get them to the finish line! If you like what I'm doing, or this project has brought you some value, please consider subscribing on my [Patreon](https://www.patreon.com/user/posts?u=83632131). There's not too many extra rewards besides better software more frequently. Alternatively, if you want me to work up to a part-time amount of hours with you, feel free to reach out to me at hire.tysam@gmail.com. I'd love to hear from you.
+Your support helps a lot -- even if it's a dollar as month. I have several more projects I'm in various stages on, and you can help me have the money and time to get this project (and the others) to the finish line! If you like what I'm doing, or this project has brought you some value, please consider subscribing on my [Patreon](https://www.patreon.com/user/posts?u=83632131). There's not too many extra rewards besides better software more frequently. Alternatively, if you want me to work up to a part-time amount of hours with you, feel free to reach out to me at hire.tysam@gmail.com. I'd love to hear from you.
 
 
 ### Known Bugs
