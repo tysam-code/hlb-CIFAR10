@@ -20,7 +20,7 @@ Goals:
 * torch- and python-idiomatic
 * hackable 
 * few external dependencies (currently only torch and torchvision)
-* near world-record single-GPU training time (~<12.38 seconds on an A100, the current world record, down from ~18.1 seconds originally). 
+* ~world-record single-GPU training time (this repo holds the current world record at ~<12.38 seconds on an A100, down from ~18.1 seconds originally). 
 * <2 seconds training time in <2 years 
 
 This is a neural network implementation that started from a painstaking reproduction from nearly the ground-up a hacking-friendly version of [David Page's original ultra-fast CIFAR-10 implementation on a single GPU](https://myrtle.ai/learn/how-to-train-your-resnet/). This repository is meant to function primarily as a very human-friendly researcher's toolbench first, a benchmark a close second (ironically currently holding the world record), and a learning codebase third. We're now in the stage where the real fun begins -- the journey to <2 seconds. Some of the early progress was surprisingly easy, but it will likely get pretty crazy as we get closer and closer to our goal.
