@@ -1,6 +1,7 @@
 ## CIFAR10 hyperlightspeedbench
 Welcome to the hyperlightspeedbench CIFAR-10 (HLB-CIFAR10) repo.
 
+If you like to [relatable thing], follow me on twitter! [![Twitter URL](https://img.shields.io/twitter/url/https/twitter.com/hi_tysam.svg?style=social&label=Follow%20%40TySam_And)](https://twitter.com/hi_tysam)
 
 ### How to Run
 
