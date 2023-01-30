@@ -21,15 +21,18 @@ Goals:
 * hackable 
 * few external dependencies (currently only torch and torchvision)
 * ~world-record single-GPU training time (this repo holds the current world record at ~<12.38 seconds on an A100, down from ~18.1 seconds originally). 
-* <2 seconds training time in <2 years 
+* <2 seconds training time in <2 years (yep!)
 
-This is a neural network implementation that started from a painstaking reproduction from nearly the ground-up a hacking-friendly version of [David Page's original ultra-fast CIFAR-10 implementation on a single GPU](https://myrtle.ai/learn/how-to-train-your-resnet/). This repository is meant to function primarily as a very human-friendly researcher's toolbench first, a benchmark a close second (ironically currently holding the world record), and a learning codebase third. We're now in the stage where the real fun begins -- the journey to <2 seconds. Some of the early progress was surprisingly easy, but it will likely get pretty crazy as we get closer and closer to our goal.
+This is a neural network implementation of a very speedily-training network that originally started as a painstaking reproduction of [David Page's original ultra-fast CIFAR-10 implementation on a single GPU](https://myrtle.ai/learn/how-to-train-your-resnet/), but written nearly from the ground-up to be extremely rapid-experimentation-friendly. Part of the benefit of this is that we now hold the world record for single GPU training speeds on CIFAR10 (under 10 seconds on an A100!!!)
 
-This code took about 120-130 hours of work during the initial write from start to finish, about 80-90+ of which were mind-numbingly tedious debugging. Some strange things seem to really matter for performance (speed and accuracy), and some strangely do not seem to. To that end, I found it very educational to create (and may do a writeup someday if enough people and I have enough interest in it). 
+What we've added:
+* squeeze and excite layers
+* way too much hyperparameter tuning
+* miscellaneous architecture trimmings (see the patch notes)
+* memory format changes (and more!) to better use tensor cores/etc
+* and more!
 
-
-I built this because I loved David's work but his code was difficult for my quick-experiment-and-hacking usecases. This code is in a single file and extremely flat, but is not as durable for long-term production-level bug maintenance. You're meant to check out a fresh repo whenever you have a new idea. It is excellent for rapid idea exploring -- almost everywhere in the pipeline is exposed and built to not be user-hostile. I truly enjoy personally using this code, and hope you do as well! :D Please let me know if you have any feedback. I hope to continue publishing updates to this in the future, so your support through word of mouth or otherwise is especially encouraged.
-
+This code, in comparison to David's original code, is in a single file and extremely flat, but is not as durable for long-term production-level bug maintenance. You're meant to check out a fresh repo whenever you have a new idea. It is excellent for rapid idea exploring -- almost everywhere in the pipeline is exposed and built to be user-friendly. I truly enjoy personally using this code, and hope you do as well! :D Please let me know if you have any feedback. I hope to continue publishing updates to this in the future, so your support is encouraged. Share this repo with someone you know that might like it!
 
 Your support helps a lot -- even if it's a dollar as month. I have several more projects I'm in various stages on, and you can help me have the money and time to get this project (and the others) to the finish line! If you like what I'm doing, or this project has brought you some value, please consider subscribing on my [Patreon](https://www.patreon.com/user/posts?u=83632131). There's not too many extra rewards besides better software more frequently. Alternatively, if you want me to work up to a part-time amount of hours with you, feel free to reach out to me at hire.tysam@gmail.com. I'd love to hear from you.
 
