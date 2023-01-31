@@ -639,4 +639,4 @@ if __name__ == "__main__":
     acc_list = []
     for run_num in range(25):
         acc_list.append(torch.tensor(main()))
-    print("Mean and variance:", (torch.mean(torch.stack(acc_list)), torch.var(torch.stack(acc_list)).item()).item())
+    print("Mean and variance:", (torch.mean(torch.stack(acc_list)).item(), torch.var(torch.stack(acc_list)).item()))
