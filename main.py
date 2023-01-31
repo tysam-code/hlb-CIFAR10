@@ -36,7 +36,7 @@ from torchvision import transforms
 
 # This is for testing that certain changes don't exceed X% portion of the reference GPU (here an A100)
 # so we can help reduce a possibility that future releases don't take away the accessibility of this codebase.
-#torch.cuda.set_per_process_memory_fraction(fraction=8./40., device=0) ## 40. GB is the maximum memory of the base A100 GPU
+torch.cuda.set_per_process_memory_fraction(fraction=8./40., device=0) ## 40. GB is the maximum memory of the base A100 GPU
 
 # set global defaults (in this particular file) for convolutions
 default_conv_kwargs = {'kernel_size': 3, 'padding': 'same', 'bias': False}
@@ -61,7 +61,7 @@ hyp = {
         'batch_norm_momentum': .8,
         'cutout_size': 0,
         'pad_amount': 3,
-        'base_depth': 64 ## This should be a factor of 8 in some way to stay tensor core friendly
+        'base_depth': 128 ## This should be a factor of 8 in some way to stay tensor core friendly
     },
     'misc': {
         'ema': {
@@ -69,7 +69,7 @@ hyp = {
             'decay_base': .986,
             'every_n_steps': 2,
         },
-        'train_epochs': 10,
+        'train_epochs': 150,
         'device': 'cuda',
         'data_location': 'data.pt',
     }
