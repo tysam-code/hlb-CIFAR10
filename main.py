@@ -18,7 +18,7 @@ torch.backends.cuda.matmul.allow_tf32 = True
 import torch.nn.functional as F
 from torch import nn
 
-from dataset import get_dataset
+from dataset import get_dataset, get_batches
 from network import make_net
 
 ## <-- teaching comments
@@ -80,51 +80,6 @@ data = get_dataset(hyp['misc']['data_location'],
                    hyp['net']['pad_amount'])
 
 
-## This is actually (I believe) a pretty clean implementation of how to do something like this, since shifted-square masks unique to each depth-channel can actually be rather
-## tricky in practice. That said, if there's a better way, please do feel free to submit it! This can be one of the harder parts of the code to understand (though I personally get
-## stuck on the fold/unfold process for the lower-level convolution calculations.
-def make_random_square_masks(inputs, mask_size):
-    ##### TODO: Double check that this properly covers the whole range of values. :'( :')
-    if mask_size == 0:
-        return None # no need to cutout or do anything like that since the patch_size is set to 0
-    is_even = int(mask_size % 2 == 0)
-    in_shape = inputs.shape
-
-    # seed centers of squares to cutout boxes from, in one dimension each
-    mask_center_y = torch.empty(in_shape[0], dtype=torch.long, device=inputs.device).random_(mask_size//2-is_even, in_shape[-2]-mask_size//2-is_even)
-    mask_center_x = torch.empty(in_shape[0], dtype=torch.long, device=inputs.device).random_(mask_size//2-is_even, in_shape[-1]-mask_size//2-is_even)
-
-    # measure distance, using the center as a reference point
-    to_mask_y_dists = torch.arange(in_shape[-2], device=inputs.device).view(1, 1, in_shape[-2], 1) - mask_center_y.view(-1, 1, 1, 1)
-    to_mask_x_dists = torch.arange(in_shape[-1], device=inputs.device).view(1, 1, 1, in_shape[-1]) - mask_center_x.view(-1, 1, 1, 1)
-
-    to_mask_y = (to_mask_y_dists >= (-(mask_size // 2) + is_even)) * (to_mask_y_dists <= mask_size // 2)
-    to_mask_x = (to_mask_x_dists >= (-(mask_size // 2) + is_even)) * (to_mask_x_dists <= mask_size // 2)
-
-    final_mask = to_mask_y * to_mask_x ## Turn (y by 1) and (x by 1) boolean masks into (y by x) masks through multiplication. Their intersection is square, hurray! :D
-
-    return final_mask
-
-def batch_cutout(inputs, patch_size):
-    with torch.no_grad():
-        cutout_batch_mask = make_random_square_masks(inputs, patch_size)
-        if cutout_batch_mask is None:
-            return inputs # if the mask is None, then that's because the patch size was set to 0 and we will not be using cutout today.
-        # TODO: Could be fused with the crop operation for sheer speeeeeds. :D <3 :))))
-        cutout_batch = torch.where(cutout_batch_mask, torch.zeros_like(inputs), inputs)
-        return cutout_batch
-
-def batch_crop(inputs, crop_size):
-    with torch.no_grad():
-        crop_mask_batch = make_random_square_masks(inputs, crop_size)
-        cropped_batch = torch.masked_select(inputs, crop_mask_batch).view(inputs.shape[0], inputs.shape[1], crop_size, crop_size)
-        return cropped_batch
-
-def batch_flip_lr(batch_images, flip_chance=.5):
-    with torch.no_grad():
-        # TODO: Is there a more elegant way to do this? :') :'((((
-        return torch.where(torch.rand_like(batch_images[:, 0, 0, 0].view(-1, 1, 1, 1)) < flip_chance, torch.flip(batch_images, (-1,)), batch_images)
-
 
 ########################################
 #          Training Helpers            #
@@ -146,28 +101,7 @@ class NetworkEMA(nn.Module):
         with torch.no_grad():
             return self.net_ema(inputs)
 
-# TODO: Could we jit this in the (more distant) future? :)
-@torch.no_grad()
-def get_batches(data_dict, key, batchsize):
-    num_epoch_examples = len(data_dict[key]['images'])
-    shuffled = torch.randperm(num_epoch_examples, device='cuda')
-    crop_size = 32
-    ## Here, we prep the dataset by applying all data augmentations in batches ahead of time before each epoch, then we return an iterator below
-    ## that iterates in chunks over with a random derangement (i.e. shuffled indices) of the individual examples. So we get perfectly-shuffled
-    ## batches (which skip the last batch if it's not a full batch), but everything seems to be (and hopefully is! :D) properly shuffled. :)
-    if key == 'train':
-        images = batch_crop(data_dict[key]['images'], crop_size) # TODO: hardcoded image size for now?
-        images = batch_flip_lr(images)
-        images = batch_cutout(images, patch_size=hyp['net']['cutout_size'])
-    else:
-        images = data_dict[key]['images']
 
-    # Send the images to an (in beta) channels_last to help improve tensor core occupancy (and reduce NCHW <-> NHWC thrash) during training
-    images = images.to(memory_format=torch.channels_last)
-    for idx in range(num_epoch_examples // batchsize):
-        if not (idx+1)*batchsize > num_epoch_examples: ## Use the shuffled randperm to assemble individual items into a minibatch
-            yield images.index_select(0, shuffled[idx*batchsize:(idx+1)*batchsize]), \
-                  data_dict[key]['targets'].index_select(0, shuffled[idx*batchsize:(idx+1)*batchsize]) ## Each item is only used/accessed by the network once per epoch. :D
 
 
 def init_split_parameter_dictionaries(network):
@@ -313,7 +247,8 @@ def main():
           # doesn't work with torch 2.0 yet
           #train_epoch_compiled = torch.compile(train_epoch)
 
-          for epoch_step, (inputs, targets) in enumerate(get_batches(data, key='train', batchsize=batchsize)):
+          for epoch_step, (inputs, targets) in enumerate(
+                get_batches(data, key='train', batchsize=batchsize, cutout_size=hyp['net']['cutout_size'])):
               train_acc_e, train_loss_e = train_epoch(net, inputs, targets, epoch_step, opt, opt_bias)
               train_acc, train_loss = train_acc_e or train_acc, train_loss_e or train_loss
 
@@ -344,7 +279,7 @@ def main():
           loss_list_val, acc_list, acc_list_ema = [], [], []
 
           with torch.no_grad():
-              for inputs, targets in get_batches(data, key='eval', batchsize=eval_batchsize):
+              for inputs, targets in get_batches(data, key='eval', batchsize=eval_batchsize, cutout_size=hyp['net']['cutout_size']):
                   if epoch >= ema_epoch_start:
                       outputs = net_ema(inputs)
                       acc_list_ema.append((outputs.argmax(-1) == targets).float().mean())
