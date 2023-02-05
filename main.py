@@ -14,6 +14,7 @@ import os
 import copy
 
 import torch
+torch.backends.cuda.matmul.allow_tf32 = True
 import torch.nn.functional as F
 from torch import nn
 
@@ -88,8 +89,8 @@ if not os.path.exists(hyp['misc']['data_location']):
         transform = transforms.Compose([
             transforms.ToTensor()])
 
-        cifar10      = torchvision.datasets.CIFAR10('cifar10/', download=True,  train=True,  transform=transform)
-        cifar10_eval = torchvision.datasets.CIFAR10('cifar10/', download=False, train=False, transform=transform)
+        cifar10      = torchvision.datasets.CIFAR10('~/dataroot/', download=True,  train=True,  transform=transform)
+        cifar10_eval = torchvision.datasets.CIFAR10('~/dataroot/', download=False, train=False, transform=transform)
 
         # use the dataloader to get a single batch of all of the dataset items at once.
         train_dataset_gpu_loader = torch.utils.data.DataLoader(cifar10, batch_size=len(cifar10), drop_last=True,
@@ -174,7 +175,7 @@ class ConvGroup(nn.Module):
         self.conv1 = Conv(channels_in, channels_out)
         self.pool1 = nn.MaxPool2d(2)
         self.norm1 = BatchNorm(channels_out)
-        self.activ = nn.GELU()          
+        self.activ = nn.GELU()
 
         # note: this has to be flat if we're jitting things.... we just might burn a bit of extra GPU mem if so
         if not short:
@@ -226,7 +227,7 @@ class TemperatureScaler(nn.Module):
 class FastGlobalMaxPooling(nn.Module):
     def __init__(self):
         super().__init__()
-    
+
     def forward(self, x):
         # Previously was chained torch.max calls.
         # requires less time than AdaptiveMax2dPooling -- about ~.3s for the entire run, in fact (which is pretty significant! :O :D :O :O <3 <3 <3 <3)
@@ -278,7 +279,7 @@ def set_whitening_conv(conv_layer, eigenvalues, eigenvectors, eps=1e-2, freeze=T
     conv_layer.weight.data[-eigenvectors.shape[0]:, :, :, :] = (eigenvectors/torch.sqrt(eigenvalues+eps))[-shape[0]:, :, :, :]
     ## We don't want to train this, since this is implicitly whitening over the whole dataset
     ## For more info, see David Page's original blogposts (link in the README.md as of this commit.)
-    if freeze: 
+    if freeze:
         conv_layer.weight.requires_grad = False
 
 
@@ -494,6 +495,34 @@ print_training_details(logging_columns_list, column_heads_only=True) ## print ou
 #           Train and Eval             #
 ########################################
 
+def train_epoch(net, inputs, targets, epoch_step, opt, opt_bias):
+    train_acc, train_loss = None, None
+
+    ## Run everything through the network
+    outputs = net(inputs)
+
+    loss_scale_scaler = 1./16 # Hardcoded for now, preserves some accuracy during the loss summing process, balancing out its regularization effects
+    ## If you want to add other losses or hack around with the loss, you can do that here.
+    loss = loss_fn(outputs, targets).mul(loss_scale_scaler).sum().div(loss_scale_scaler) ## Note, as noted in the original blog posts, the summing here does a kind of loss scaling
+                                            ## (and is thus batchsize dependent as a result). This can be somewhat good or bad, depending...
+
+    # we only take the last-saved accs and losses from train
+    if epoch_step % 50 == 0:
+        train_acc = (outputs.detach().argmax(-1) == targets).float().mean().item()
+        train_loss = loss.detach().cpu().item()/batchsize
+
+    loss.backward()
+
+    ## Step for each optimizer, in turn.
+    opt.step()
+    opt_bias.step()
+
+    ## Using 'set_to_none' I believe is slightly faster (albeit riskier w/ funky gradient update workflows) than under the default 'set to zero' method
+    opt.zero_grad(set_to_none=True)
+    opt_bias.zero_grad(set_to_none=True)
+
+    return train_acc, train_loss
+
 def main():
     # Initializing constants for the whole run.
     net_ema = None ## Reset any existing network emas, we want to have _something_ to check for existence so we can initialize the EMA right from where the network is during training
@@ -501,7 +530,7 @@ def main():
 
     total_time_seconds = 0.
     current_steps = 0.
-    
+
     # TODO: Doesn't currently account for partial epochs really (since we're not doing "real" epochs across the whole batchsize)....
     num_steps_per_epoch      = len(data['train']['images']) // batchsize
     total_train_steps        = num_steps_per_epoch * hyp['misc']['train_epochs']
@@ -543,7 +572,7 @@ def main():
     ## has a timing feature too, but there's no synchronizes so I suspect the times reported are much faster than they may be in actuality
     ## due to some of the quirks of timing GPU operations.
     torch.cuda.synchronize() ## clean up any pre-net setup operations
-    
+
 
     if True: ## Sometimes we need a conditional/for loop here, this is placed to save the trouble of needing to indent
         for epoch in range(hyp['misc']['train_epochs']):
@@ -556,38 +585,23 @@ def main():
 
           loss_train = None
           accuracy_train = None
+          train_acc, train_loss = None, None
+
+          # doesn't work with torch 2.0 yet
+          #train_epoch_compiled = torch.compile(train_epoch)
 
           for epoch_step, (inputs, targets) in enumerate(get_batches(data, key='train', batchsize=batchsize)):
-              ## Run everything through the network
-              outputs = net(inputs)
-              
-              loss_scale_scaler = 1./16 # Hardcoded for now, preserves some accuracy during the loss summing process, balancing out its regularization effects
-              ## If you want to add other losses or hack around with the loss, you can do that here.
-              loss = loss_fn(outputs, targets).mul(loss_scale_scaler).sum().div(loss_scale_scaler) ## Note, as noted in the original blog posts, the summing here does a kind of loss scaling
-                                                     ## (and is thus batchsize dependent as a result). This can be somewhat good or bad, depending...
-
-              # we only take the last-saved accs and losses from train
-              if epoch_step % 50 == 0:
-                  train_acc = (outputs.detach().argmax(-1) == targets).float().mean().item()
-                  train_loss = loss.detach().cpu().item()/batchsize
-
-              loss.backward()
-
-              ## Step for each optimizer, in turn.
-              opt.step()
-              opt_bias.step()
+              train_acc_e, train_loss_e = train_epoch(net, inputs, targets, epoch_step, opt, opt_bias)
+              train_acc, train_loss = train_acc_e or train_acc, train_loss_e or train_loss
 
               if current_steps < total_train_steps - num_low_lr_steps_for_ema - 1: # the '-1' is because the lr scheduler tends to overshoot (even below 0 if the final lr is ~0) on the last step for some reason.
-                  # We only want to step the lr_schedulers while we have training steps to consume. Otherwise we get a not-so-friendly error from PyTorch
-                  lr_sched.step()
-                  lr_sched_bias.step()
+                # We only want to step the lr_schedulers while we have training steps to consume. Otherwise we get a not-so-friendly error from PyTorch
+                lr_sched.step()
+                lr_sched_bias.step()
 
-              ## Using 'set_to_none' I believe is slightly faster (albeit riskier w/ funky gradient update workflows) than under the default 'set to zero' method
-              opt.zero_grad(set_to_none=True)
-              opt_bias.zero_grad(set_to_none=True)
               current_steps += 1
 
-              if epoch >= ema_epoch_start and current_steps % hyp['misc']['ema']['every_n_steps'] == 0:          
+              if epoch >= ema_epoch_start and current_steps % hyp['misc']['ema']['every_n_steps'] == 0:
                   ## Initialize the ema from the network at this point in time if it does not already exist.... :D
                   if net_ema is None or epoch_step < num_cooldown_before_freeze_steps: # don't snapshot the network yet if so!
                       net_ema = NetworkEMA(net, decay=projected_ema_decay_val)
@@ -605,7 +619,7 @@ def main():
           eval_batchsize = 1000
           assert data['eval']['images'].shape[0] % eval_batchsize == 0, "Error: The eval batchsize must evenly divide the eval dataset (for now, we don't have drop_remainder implemented yet)."
           loss_list_val, acc_list, acc_list_ema = [], [], []
-          
+
           with torch.no_grad():
               for inputs, targets in get_batches(data, key='eval', batchsize=eval_batchsize):
                   if epoch >= ema_epoch_start:
@@ -614,7 +628,7 @@ def main():
                   outputs = net(inputs)
                   loss_list_val.append(loss_fn(outputs, targets).float().mean())
                   acc_list.append((outputs.argmax(-1) == targets).float().mean())
-                  
+
               val_acc = torch.stack(acc_list).mean().item()
               ema_val_acc = None
               # TODO: We can fuse these two operations (just above and below) all-together like :D :))))
@@ -637,6 +651,6 @@ def main():
 
 if __name__ == "__main__":
     acc_list = []
-    for run_num in range(25):
+    for run_num in range(1): # use 25 for final numbers
         acc_list.append(torch.tensor(main()))
     print("Mean and variance:", (torch.mean(torch.stack(acc_list)).item(), torch.var(torch.stack(acc_list)).item()))
