@@ -7,6 +7,17 @@ torch.backends.cuda.matmul.allow_tf32 = True
 # set global defaults (in this particular file) for convolutions
 default_conv_kwargs = {'kernel_size': 3, 'padding': 'same', 'bias': False}
 
+hyp ={
+    'net': {
+        'whitening': {
+            'kernel_size': 2,
+            'num_examples': 50000,
+        },
+        'batch_norm_momentum': .8,
+        'base_depth': 64 ## This should be a factor of 8 in some way to stay tensor core friendly
+    },
+}
+
 # We might be able to fuse this weight and save some memory/runtime/etc, since the fast version of the network might be able to do without somehow....
 class BatchNorm(nn.BatchNorm2d):
     def __init__(self, num_features, eps=1e-12, momentum=None, weight=False, bias=True):
@@ -191,8 +202,13 @@ def set_whitening_conv(conv_layer, eigenvalues, eigenvectors, eps=1e-2, freeze=T
         conv_layer.weight.requires_grad = False
 
 
-def make_net(data, kernel_size, scaling_factor, device, num_examples, pad_amount, base_depth, batch_norm_momentum):
+def make_net(data, scaling_factor, device, pad_amount):
     # You can play with this on your own if you want, for the first beta I wanted to keep things simple (for now) and leave it out of the hyperparams dict
+    kernel_size = hyp['net']['whitening']['kernel_size']
+    num_examples = hyp['net']['whitening']['num_examples']
+    base_depth = hyp['net']['base_depth']
+    batch_norm_momentum = hyp['net']['batch_norm_momentum']
+
     scaler = 2.
     depths = {
         # 64  w/ scaler at base value

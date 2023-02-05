@@ -53,16 +53,6 @@ hyp = {
         'scaling_factor': 1./10,
         'percent_start': .2,
     },
-    'net': {
-        'whitening': {
-            'kernel_size': 2,
-            'num_examples': 50000,
-        },
-        'batch_norm_momentum': .8,
-        'cutout_size': 0,
-        'pad_amount': 3,
-        'base_depth': 64 ## This should be a factor of 8 in some way to stay tensor core friendly
-    },
     'misc': {
         'ema': {
             'epochs': 2,
@@ -72,12 +62,14 @@ hyp = {
         'train_epochs': 10,
         'device': 'cuda',
         'data_location': 'data.pt',
+        'pad_amount': 3,
+        'cutout_size': 0,
     }
 }
 
 data = get_dataset(hyp['misc']['data_location'],
                    hyp['misc']['device'],
-                   hyp['net']['pad_amount'])
+                   hyp['misc']['pad_amount'])
 
 
 
@@ -198,13 +190,10 @@ def main():
 
     # Get network
     net = make_net(data,
-                   hyp['net']['whitening']['kernel_size'],
+
                    hyp['opt']['scaling_factor'],
                    hyp['misc']['device'],
-                   hyp['net']['whitening']['num_examples'],
-                   hyp['net']['pad_amount'],
-                   hyp['net']['base_depth'],
-                   hyp['net']['batch_norm_momentum'])
+                   hyp['misc']['pad_amount'])
 
     ## Stowing the creation of these into a helper function to make things a bit more readable....
     non_bias_params, bias_params = init_split_parameter_dictionaries(net)
@@ -248,7 +237,7 @@ def main():
           #train_epoch_compiled = torch.compile(train_epoch)
 
           for epoch_step, (inputs, targets) in enumerate(
-                get_batches(data, key='train', batchsize=batchsize, cutout_size=hyp['net']['cutout_size'])):
+                get_batches(data, key='train', batchsize=batchsize, cutout_size=hyp['misc']['cutout_size'])):
               train_acc_e, train_loss_e = train_epoch(net, inputs, targets, epoch_step, opt, opt_bias)
               train_acc, train_loss = train_acc_e or train_acc, train_loss_e or train_loss
 
@@ -279,7 +268,7 @@ def main():
           loss_list_val, acc_list, acc_list_ema = [], [], []
 
           with torch.no_grad():
-              for inputs, targets in get_batches(data, key='eval', batchsize=eval_batchsize, cutout_size=hyp['net']['cutout_size']):
+              for inputs, targets in get_batches(data, key='eval', batchsize=eval_batchsize, cutout_size=hyp['misc']['cutout_size']):
                   if epoch >= ema_epoch_start:
                       outputs = net_ema(inputs)
                       acc_list_ema.append((outputs.argmax(-1) == targets).float().mean())
