@@ -19,7 +19,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from dataset import get_dataset
-
+from network import make_net
 
 ## <-- teaching comments
 # <-- functional comments
@@ -39,8 +39,7 @@ from dataset import get_dataset
 # so we can help reduce a possibility that future releases don't take away the accessibility of this codebase.
 #torch.cuda.set_per_process_memory_fraction(fraction=8./40., device=0) ## 40. GB is the maximum memory of the base A100 GPU
 
-# set global defaults (in this particular file) for convolutions
-default_conv_kwargs = {'kernel_size': 3, 'padding': 'same', 'bias': False}
+
 
 batchsize = 512
 bias_scaler = 32
@@ -80,229 +79,6 @@ data = get_dataset(hyp['misc']['data_location'],
                    hyp['misc']['device'],
                    hyp['net']['pad_amount'])
 
-#############################################
-#            Network Components             #
-#############################################
-
-# We might be able to fuse this weight and save some memory/runtime/etc, since the fast version of the network might be able to do without somehow....
-class BatchNorm(nn.BatchNorm2d):
-    def __init__(self, num_features, eps=1e-12, momentum=hyp['net']['batch_norm_momentum'], weight=False, bias=True):
-        super().__init__(num_features, eps=eps, momentum=momentum)
-        self.weight.data.fill_(1.0)
-        self.bias.data.fill_(0.0)
-        self.weight.requires_grad = weight
-        self.bias.requires_grad = bias
-
-# Allows us to set default arguments for the whole convolution itself.
-class Conv(nn.Conv2d):
-    def __init__(self, *args, **kwargs):
-        kwargs = {**default_conv_kwargs, **kwargs}
-        super().__init__(*args, **kwargs)
-        self.kwargs = kwargs
-
-# can hack any changes to each residual group that you want directly in here
-class ConvGroup(nn.Module):
-    def __init__(self, channels_in, channels_out, residual, short, pool, se):
-        super().__init__()
-        self.short = short
-        self.pool = pool # todo: we can condense this later
-        self.se = se
-
-        self.residual = residual
-        self.channels_in = channels_in
-        self.channels_out = channels_out
-
-        self.conv1 = Conv(channels_in, channels_out)
-        self.pool1 = nn.MaxPool2d(2)
-        self.norm1 = BatchNorm(channels_out)
-        self.activ = nn.GELU()
-
-        # note: this has to be flat if we're jitting things.... we just might burn a bit of extra GPU mem if so
-        if not short:
-            self.conv2 = Conv(channels_out, channels_out)
-            self.conv3 = Conv(channels_out, channels_out)
-            self.norm2 = BatchNorm(channels_out)
-            self.norm3 = BatchNorm(channels_out)
-
-            self.se1 = nn.Linear(channels_out, channels_out//16)
-            self.se2 = nn.Linear(channels_out//16, channels_out)
-
-    def forward(self, x):
-        x = self.conv1(x)
-        if self.pool:
-            x = self.pool1(x)
-        x = self.norm1(x)
-        x = self.activ(x)
-        if self.short: # layer 2 doesn't necessarily need the residual, so we just return it.
-            return x
-        residual = x
-        if self.se:
-            mult = torch.sigmoid(self.se2(self.activ(self.se1(torch.mean(residual, dim=(2,3)))))).unsqueeze(-1).unsqueeze(-1)
-        x = self.conv2(x)
-        x = self.norm2(x)
-        x = self.activ(x)
-        x = self.conv3(x)
-        if self.se:
-            x = x * mult
-
-        x = self.norm3(x)
-        x = self.activ(x)
-        x = x + residual # haiku
-
-        return x
-
-# Set to 1 for now just to debug a few things....
-class TemperatureScaler(nn.Module):
-    def __init__(self, init_val):
-        super().__init__()
-        self.scaler = torch.tensor(init_val)
-
-    def forward(self, x):
-        x.float() ## save precision for the gradients in the backwards pass
-                  ## I personally believe from experience that this is important
-                  ## for a few reasons. I believe this is the main functional difference between
-                  ## my implementation, and David's implementation...
-        return x.mul(self.scaler)
-
-class FastGlobalMaxPooling(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, x):
-        # Previously was chained torch.max calls.
-        # requires less time than AdaptiveMax2dPooling -- about ~.3s for the entire run, in fact (which is pretty significant! :O :D :O :O <3 <3 <3 <3)
-        return torch.amax(x, dim=(2,3)) # Global maximum pooling
-
-#############################################
-#          Init Helper Functions            #
-#############################################
-
-def get_patches(x, patch_shape=(3, 3), dtype=torch.float32):
-    # TODO: Annotate
-    c, (h, w) = x.shape[1], patch_shape
-    return x.unfold(2,h,1).unfold(3,w,1).transpose(1,3).reshape(-1,c,h,w).to(dtype) # TODO: Annotate?
-
-def get_whitening_parameters(patches):
-    # TODO: Let's annotate this, please! :'D / D':
-    n,c,h,w = patches.shape
-    est_covariance = torch.cov(patches.view(n, c*h*w).t())
-    eigenvalues, eigenvectors = torch.linalg.eigh(est_covariance, UPLO='U') # this is the same as saying we want our eigenvectors, with the specification that the matrix be an upper triangular matrix (instead of a lower-triangular matrix)
-    return eigenvalues.flip(0).view(-1, 1, 1, 1), eigenvectors.t().reshape(c*h*w,c,h,w).flip(0)
-
-# Run this over the training set to calculate the patch statistics, then set the initial convolution as a non-learnable 'whitening' layer
-def init_whitening_conv(layer, train_set=None, num_examples=None, previous_block_data=None, pad_amount=None, freeze=True, whiten_splits=None):
-    if train_set is not None and previous_block_data is None:
-        if pad_amount > 0:
-            previous_block_data = train_set[:num_examples,:,pad_amount:-pad_amount,pad_amount:-pad_amount] # if it's none, we're at the beginning of our network.
-        else:
-            previous_block_data = train_set[:num_examples,:,:,:]
-    if whiten_splits is None:
-         previous_block_data_split = [previous_block_data] # list of length 1 so we can reuse the splitting code down below
-    else:
-         previous_block_data_split = previous_block_data.split(whiten_splits, dim=0)
-
-    eigenvalue_list, eigenvector_list = [], []
-    for data_split in previous_block_data_split:
-        eigenvalues, eigenvectors = get_whitening_parameters(get_patches(data_split, patch_shape=layer.weight.data.shape[2:])) # center crop to remove padding
-        eigenvalue_list.append(eigenvalues)
-        eigenvector_list.append(eigenvectors)
-
-    eigenvalues = torch.stack(eigenvalue_list, dim=0).mean(0)
-    eigenvectors = torch.stack(eigenvector_list, dim=0).mean(0)
-    # for some reason, the eigenvalues and eigenvectors seem to come out all in float32 for this? ! ?! ?!?!?!? :'(((( </3
-    set_whitening_conv(layer, eigenvalues.to(dtype=layer.weight.dtype), eigenvectors.to(dtype=layer.weight.dtype), freeze=freeze)
-    data = layer(previous_block_data.to(dtype=layer.weight.dtype))
-    return data
-
-def set_whitening_conv(conv_layer, eigenvalues, eigenvectors, eps=1e-2, freeze=True):
-    shape = conv_layer.weight.data.shape
-    conv_layer.weight.data[-eigenvectors.shape[0]:, :, :, :] = (eigenvectors/torch.sqrt(eigenvalues+eps))[-shape[0]:, :, :, :]
-    ## We don't want to train this, since this is implicitly whitening over the whole dataset
-    ## For more info, see David Page's original blogposts (link in the README.md as of this commit.)
-    if freeze:
-        conv_layer.weight.requires_grad = False
-
-
-#############################################
-#            Network Definition             #
-#############################################
-
-scaler = 2. ## You can play with this on your own if you want, for the first beta I wanted to keep things simple (for now) and leave it out of the hyperparams dict
-depths = {
-    'init':   round(scaler**-1*hyp['net']['base_depth']), # 64  w/ scaler at base value
-    'block1': round(scaler**1*hyp['net']['base_depth']), # 128 w/ scaler at base value
-    'block2': round(scaler**2*hyp['net']['base_depth']), # 256 w/ scaler at base value
-    'block3': round(scaler**3*hyp['net']['base_depth']), # 512 w/ scaler at base value
-    'num_classes': 10
-}
-
-class SpeedyResNet(nn.Module):
-    def __init__(self, network_dict):
-        super().__init__()
-        self.net_dict = network_dict # flexible, defined in the make_net function
-
-    # This allows you to customize/change the execution order of the network as needed.
-    def forward(self, x):
-        if not self.training:
-            x = torch.cat((x, torch.flip(x, (-1,))))
-        x = self.net_dict['initial_block']['whiten'](x)
-        x = self.net_dict['initial_block']['project'](x)
-        x = self.net_dict['initial_block']['norm'](x)
-        x = self.net_dict['initial_block']['activation'](x)
-        x = self.net_dict['residual1'](x)
-        x = self.net_dict['residual2'](x)
-        x = self.net_dict['residual3'](x)
-        x = self.net_dict['pooling'](x)
-        x = self.net_dict['linear'](x)
-        x = self.net_dict['temperature'](x)
-        if not self.training:
-            # Average the predictions from the lr-flipped inputs during eval
-            orig, flipped = x.split(x.shape[0]//2, dim=0)
-            x = .5 * orig + .5 * flipped
-        return x
-
-def make_net():
-    # TODO: A way to make this cleaner??
-    # Note, you have to specify any arguments overlapping with defaults (i.e. everything but in/out depths) as kwargs so that they are properly overridden (TODO cleanup somehow?)
-    whiten_conv_depth = 3*hyp['net']['whitening']['kernel_size']**2
-    network_dict = nn.ModuleDict({
-        'initial_block': nn.ModuleDict({
-            'whiten': Conv(3, whiten_conv_depth, kernel_size=hyp['net']['whitening']['kernel_size'], padding=0),
-            'project': Conv(whiten_conv_depth, depths['init'], kernel_size=1),
-            'norm': BatchNorm(depths['init'], weight=False),
-            'activation': nn.GELU(),
-        }),
-        'residual1': ConvGroup(depths['init'], depths['block1'], residual=True, short=False, pool=True, se=True),
-        'residual2': ConvGroup(depths['block1'], depths['block2'], residual=True, short=True, pool=True, se=True),
-        'residual3': ConvGroup(depths['block2'], depths['block3'], residual=True, short=False, pool=True, se=True),
-        'pooling': FastGlobalMaxPooling(),
-        'linear': nn.Linear(depths['block3'], depths['num_classes'], bias=False),
-        'temperature': TemperatureScaler(hyp['opt']['scaling_factor'])
-    })
-
-    net = SpeedyResNet(network_dict)
-    net = net.to(hyp['misc']['device'])
-    net = net.to(memory_format=torch.channels_last) # to appropriately use tensor cores/avoid thrash while training
-    net.train()
-    net.half() # Convert network to half before initializing the initial whitening layer.
-
-    ## Initialize the whitening convolution
-    with torch.no_grad():
-        # Initialize the first layer to be fixed weights that whiten the expected input values of the network be on the unit hypersphere. (i.e. their...average vector length is 1.?, IIRC)
-        init_whitening_conv(net.net_dict['initial_block']['whiten'],
-                            data['train']['images'].index_select(0, torch.randperm(data['train']['images'].shape[0], device=data['train']['images'].device)),
-                            num_examples=hyp['net']['whitening']['num_examples'],
-                            pad_amount=hyp['net']['pad_amount'],
-                            whiten_splits=5000) ## Hardcoded for now while we figure out the optimal whitening number
-                                                ## If you're running out of memory (OOM) feel free to decrease this, but
-                                                ## the index lookup in the dataloader may give you some trouble depending
-                                                ## upon exactly how memory-limited you are
-
-    return net
-
-#############################################
-#            Data Preprocessing             #
-#############################################
 
 ## This is actually (I believe) a pretty clean implementation of how to do something like this, since shifted-square masks unique to each depth-channel can actually be rather
 ## tricky in practice. That said, if there's a better way, please do feel free to submit it! This can be one of the harder parts of the code to understand (though I personally get
@@ -487,7 +263,14 @@ def main():
     pct_start = hyp['opt']['percent_start'] * (total_train_steps/(total_train_steps - num_low_lr_steps_for_ema))
 
     # Get network
-    net = make_net()
+    net = make_net(data,
+                   hyp['net']['whitening']['kernel_size'],
+                   hyp['opt']['scaling_factor'],
+                   hyp['misc']['device'],
+                   hyp['net']['whitening']['num_examples'],
+                   hyp['net']['pad_amount'],
+                   hyp['net']['base_depth'],
+                   hyp['net']['batch_norm_momentum'])
 
     ## Stowing the creation of these into a helper function to make things a bit more readable....
     non_bias_params, bias_params = init_split_parameter_dictionaries(net)
