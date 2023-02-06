@@ -10,10 +10,6 @@ except NameError:
 """
 
 
-import functools
-from functools import partial
-import os
-import copy
 
 import torch
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -23,6 +19,8 @@ from network import make_net
 from dataset import get_dataset, get_batches
 from opt_sched import OptSched
 from ema import NetworkEMA
+from logging_utils import print_headers, print_training_details
+from evaluation import evaluate
 
 # <-- teaching comments
 # <-- functional comments
@@ -51,45 +49,21 @@ hyp = {
     'ema_steps': 2,
     'scaling_factor': 1./10,
     'train_epochs': 10,
+    'pad_amount': 3,
     'device': 'cuda',
     'data_cache_location': 'data.pt',
-    'pad_amount': 3,
-    'cutout_size': 0,
+    'label_smoothing': 0.2,
+    'eval_batchsize': 1000, # eval set size should be divisible by this number
 }
 
-data = get_dataset(hyp['data_cache_location'],
-                   hyp['device'],
-                   hyp['pad_amount'])
+data = get_dataset(hyp['data_cache_location'], hyp['device'], hyp['pad_amount'])
 
 
 # Hey look, it's the soft-targets/label-smoothed loss! Native to PyTorch. Now, _that_ is pretty cool, and simplifies things a lot, to boot! :D :)
-loss_fn = nn.CrossEntropyLoss(label_smoothing=0.2, reduction='none')
-
-logging_columns_list = ['epoch', 'train_loss', 'val_loss',
-                        'train_acc', 'val_acc', 'ema_val_acc', 'total_time_seconds']
-# define the printing function and print the column heads
+loss_fn = nn.CrossEntropyLoss(label_smoothing=hyp['label_smoothing'], reduction='none')
+loss_fn.to(hyp['device'])
 
 
-def print_training_details(columns_list, separator_left='|  ', separator_right='  ', final="|", column_heads_only=False, is_final_entry=False):
-    print_string = ""
-    if column_heads_only:
-        for column_head_name in columns_list:
-            print_string += separator_left + column_head_name + separator_right
-        print_string += final
-        print('-'*(len(print_string)))  # print the top bar
-        print(print_string)
-        print('-'*(len(print_string)))  # print the bottom bar
-    else:
-        for column_value in columns_list:
-            print_string += separator_left + column_value + separator_right
-        print_string += final
-        print(print_string)
-    if is_final_entry:
-        print('-'*(len(print_string)))  # print the final output bar
-
-
-# print out the training column heads before we print the actual content for each run.
-print_training_details(logging_columns_list, column_heads_only=True)
 
 ########################################
 #           Train and Eval             #
@@ -158,13 +132,15 @@ def main():
     # due to some of the quirks of timing GPU operations.
     torch.cuda.synchronize()  # clean up any pre-net setup operations
 
+    print_headers()
+
     if True:  # Sometimes we need a conditional/for loop here, this is placed to save the trouble of needing to indent
         for epoch in range(hyp['train_epochs']):
             #################
             # Training Mode #
             #################
             torch.cuda.synchronize()
-            starter.record()
+            starter.record() # type: ignore
             net.train()
 
             loss_train = None
@@ -175,7 +151,7 @@ def main():
             # train_epoch_compiled = torch.compile(train_epoch)
 
             for epoch_step, (inputs, targets) in enumerate(
-                    get_batches(data, key='train', batchsize=batchsize, cutout_size=hyp['cutout_size'])):
+                    get_batches(data, key='train', batchsize=batchsize)):
                 train_acc_e, train_loss_e = train_epoch(
                     net, inputs, targets, epoch_step, opt_sched)
                 train_acc, train_loss = train_acc_e or train_acc, train_loss_e or train_loss
@@ -193,52 +169,15 @@ def main():
                         continue
                     net_ema.update(net)
 
-            ender.record()
+            ender.record() # type: ignore
             torch.cuda.synchronize()
             total_time_seconds += 1e-3 * starter.elapsed_time(ender)
 
-            ####################
-            # Evaluation  Mode #
-            ####################
-            net.eval()
+            val_loss, val_acc, ema_val_acc = evaluate(net, net_ema, data, hyp['eval_batchsize'], epoch, loss_fn, ema_epoch_start)
 
-            eval_batchsize = 1000
-            assert data['eval']['images'].shape[
-                0] % eval_batchsize == 0, "Error: The eval batchsize must evenly divide the eval dataset (for now, we don't have drop_remainder implemented yet)."
-            loss_list_val, acc_list, acc_list_ema = [], [], []
-
-            with torch.no_grad():
-                for inputs, targets in get_batches(data, key='eval', batchsize=eval_batchsize, cutout_size=hyp['cutout_size']):
-                    if epoch >= ema_epoch_start:
-                        outputs = net_ema(inputs)
-                        acc_list_ema.append(
-                            (outputs.argmax(-1) == targets).float().mean())
-                    outputs = net(inputs)
-                    loss_list_val.append(
-                        loss_fn(outputs, targets).float().mean())
-                    acc_list.append(
-                        (outputs.argmax(-1) == targets).float().mean())
-
-                val_acc = torch.stack(acc_list).mean().item()
-                ema_val_acc = None
-                # TODO: We can fuse these two operations (just above and below) all-together like :D :))))
-                if epoch >= ema_epoch_start:
-                    ema_val_acc = torch.stack(acc_list_ema).mean().item()
-
-                val_loss = torch.stack(loss_list_val).mean().item()
-            # We basically need to look up local variables by name so we can have the names, so we can pad to the proper column width.
-            # Printing stuff in the terminal can get tricky and this used to use an outside library, but some of the required stuff seemed even
-            # more heinous than this, unfortunately. So we switched to the "more simple" version of this!
-
-            def format_for_table(x, locals): return (f"{locals[x]}".rjust(len(x))) \
-                if type(locals[x]) == int else "{:0.4f}".format(locals[x]).rjust(len(x)) \
-                if locals[x] is not None \
-                else " "*len(x)
-
-            # Print out our training details (sorry for the complexity, the whole logging business here is a bit of a hot mess once the columns need to be aligned and such....)
             # We also check to see if we're in our final epoch so we can print the 'bottom' of the table for each round.
-            print_training_details(list(map(partial(format_for_table, locals=locals(
-            )), logging_columns_list)), is_final_entry=(epoch == hyp['train_epochs'] - 1))
+            print_training_details(vars=locals(), is_final_entry=(epoch == hyp['train_epochs'] - 1))
+
     # Return the final ema accuracy achieved (not using the 'best accuracy' selection strategy, which I think is okay here....)
     return ema_val_acc
 

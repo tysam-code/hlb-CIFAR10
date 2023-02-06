@@ -7,6 +7,11 @@ import torchvision
 from torchvision import transforms
 import torch.nn.functional as F
 
+hyp = {
+    'data': {
+        'cutout_size': 0,
+    }
+}
 
 def get_dataset(data_location, device, pad_amount):
     if not os.path.exists(data_location):
@@ -130,7 +135,7 @@ def batch_flip_lr(batch_images, flip_chance=.5):
 
 # TODO: Could we jit this in the (more distant) future? :)
 @torch.no_grad()
-def get_batches(data_dict, key, batchsize, cutout_size):
+def get_batches(data_dict, key, batchsize, cutout_size=hyp['data']['cutout_size']):
     num_epoch_examples = len(data_dict[key]['images'])
     shuffled = torch.randperm(num_epoch_examples, device='cuda')
     crop_size = 32
