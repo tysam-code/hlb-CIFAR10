@@ -9,8 +9,7 @@ except NameError:
   pass ## we're still good
 """
 
-from torch import nn
-import torch.nn.functional as F
+
 import functools
 from functools import partial
 import os
@@ -18,6 +17,7 @@ import copy
 
 import torch
 torch.backends.cuda.matmul.allow_tf32 = True
+from torch import nn
 
 from network import make_net
 from dataset import get_dataset, get_batches
@@ -46,24 +46,22 @@ batchsize = 512
 
 # To replicate the ~95.77% accuracy in 188 seconds runs, simply change the base_depth from 64->128 and the num_epochs from 10->80
 hyp = {
-    'misc': {
-        'ema': {
-            'epochs': 2,
-            'decay_base': .986,
-            'every_n_steps': 2,
-        },
-        'scaling_factor': 1./10,
-        'train_epochs': 10,
-        'device': 'cuda',
-        'data_location': 'data.pt',
-        'pad_amount': 3,
-        'cutout_size': 0,
-    }
+    'ema': {
+        'epochs': 2,
+        'decay_base': .986,
+        'every_n_steps': 2,
+    },
+    'scaling_factor': 1./10,
+    'train_epochs': 10,
+    'device': 'cuda',
+    'data_cache_location': 'data.pt',
+    'pad_amount': 3,
+    'cutout_size': 0,
 }
 
-data = get_dataset(hyp['misc']['data_location'],
-                   hyp['misc']['device'],
-                   hyp['misc']['pad_amount'])
+data = get_dataset(hyp['data_cache_location'],
+                   hyp['device'],
+                   hyp['pad_amount'])
 
 
 ########################################
@@ -166,24 +164,24 @@ def main():
 
     # TODO: Doesn't currently account for partial epochs really (since we're not doing "real" epochs across the whole batchsize)....
     num_steps_per_epoch = len(data['train']['images']) // batchsize
-    total_train_steps = num_steps_per_epoch * hyp['misc']['train_epochs']
-    ema_epoch_start = hyp['misc']['train_epochs'] - \
-        hyp['misc']['ema']['epochs']
+    total_train_steps = num_steps_per_epoch * hyp['train_epochs']
+    ema_epoch_start = hyp['train_epochs'] - \
+        hyp['ema']['epochs']
     num_cooldown_before_freeze_steps = 0
-    num_low_lr_steps_for_ema = hyp['misc']['ema']['epochs'] * \
+    num_low_lr_steps_for_ema = hyp['ema']['epochs'] * \
         num_steps_per_epoch
 
     # I believe this wasn't logged, but the EMA update power is adjusted by being raised to the power of the number of "every n" steps
     # to somewhat accomodate for whatever the expected information intake rate is. The tradeoff I believe, though, is that this is to some degree noisier as we
     # are intaking fewer samples of our distribution-over-time, with a higher individual weight each. This can be good or bad depending upon what we want.
-    projected_ema_decay_val = hyp['misc']['ema']['decay_base'] ** hyp['misc']['ema']['every_n_steps']
+    projected_ema_decay_val = hyp['ema']['decay_base'] ** hyp['ema']['every_n_steps']
 
     # Get network
     net = make_net(data,
 
-                   hyp['misc']['scaling_factor'],
-                   hyp['misc']['device'],
-                   hyp['misc']['pad_amount'])
+                   hyp['scaling_factor'],
+                   hyp['device'],
+                   hyp['pad_amount'])
 
     opt_sched = OptSched(batchsize, net, total_train_steps, num_low_lr_steps_for_ema)
 
@@ -196,7 +194,7 @@ def main():
     torch.cuda.synchronize()  # clean up any pre-net setup operations
 
     if True:  # Sometimes we need a conditional/for loop here, this is placed to save the trouble of needing to indent
-        for epoch in range(hyp['misc']['train_epochs']):
+        for epoch in range(hyp['train_epochs']):
             #################
             # Training Mode #
             #################
@@ -212,7 +210,7 @@ def main():
             # train_epoch_compiled = torch.compile(train_epoch)
 
             for epoch_step, (inputs, targets) in enumerate(
-                    get_batches(data, key='train', batchsize=batchsize, cutout_size=hyp['misc']['cutout_size'])):
+                    get_batches(data, key='train', batchsize=batchsize, cutout_size=hyp['cutout_size'])):
                 train_acc_e, train_loss_e = train_epoch(
                     net, inputs, targets, epoch_step, opt_sched)
                 train_acc, train_loss = train_acc_e or train_acc, train_loss_e or train_loss
@@ -223,7 +221,7 @@ def main():
 
                 current_steps += 1
 
-                if epoch >= ema_epoch_start and current_steps % hyp['misc']['ema']['every_n_steps'] == 0:
+                if epoch >= ema_epoch_start and current_steps % hyp['ema']['every_n_steps'] == 0:
                     # Initialize the ema from the network at this point in time if it does not already exist.... :D
                     if net_ema is None or epoch_step < num_cooldown_before_freeze_steps:  # don't snapshot the network yet if so!
                         net_ema = NetworkEMA(
@@ -246,7 +244,7 @@ def main():
             loss_list_val, acc_list, acc_list_ema = [], [], []
 
             with torch.no_grad():
-                for inputs, targets in get_batches(data, key='eval', batchsize=eval_batchsize, cutout_size=hyp['misc']['cutout_size']):
+                for inputs, targets in get_batches(data, key='eval', batchsize=eval_batchsize, cutout_size=hyp['cutout_size']):
                     if epoch >= ema_epoch_start:
                         outputs = net_ema(inputs)
                         acc_list_ema.append(
@@ -276,7 +274,7 @@ def main():
             # Print out our training details (sorry for the complexity, the whole logging business here is a bit of a hot mess once the columns need to be aligned and such....)
             # We also check to see if we're in our final epoch so we can print the 'bottom' of the table for each round.
             print_training_details(list(map(partial(format_for_table, locals=locals(
-            )), logging_columns_list)), is_final_entry=(epoch == hyp['misc']['train_epochs'] - 1))
+            )), logging_columns_list)), is_final_entry=(epoch == hyp['train_epochs'] - 1))
     # Return the final ema accuracy achieved (not using the 'best accuracy' selection strategy, which I think is okay here....)
     return ema_val_acc
 
