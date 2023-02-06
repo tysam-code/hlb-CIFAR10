@@ -1,3 +1,5 @@
+from timeit import default_timer as timer
+
 import torch
 torch.backends.cuda.matmul.allow_tf32 = True
 from torch import nn
@@ -39,7 +41,7 @@ hyp = {
     'data_cache_location': 'data_cache.pt',
     'label_smoothing': 0.2,
     'batchsize': 512,
-    'eval_batchsize': 10000, # eval set size should be divisible by this number
+    'eval_batchsize': 1000, # eval set size should be divisible by this number
 }
 
 batchsize = hyp['batchsize']
@@ -81,13 +83,22 @@ def train_epoch(net, inputs, targets, epoch_step, opt_sched):
 
     return train_acc, train_loss
 
+class RollingAverage:
+    def __init__(self):
+        self.mean = 0
+        self.count = 0
+
+    def add(self, num):
+        self.count += 1
+        self.mean += (num - self.mean) / self.count
+        return self.mean
 
 def main():
     # Initializing constants for the whole run.
     net_ema = None  # Reset any existing network emas, we want to have _something_ to check for existence so we can initialize the EMA right from where the network is during training
     # (as opposed to initializing the network_ema from the randomly-initialized starter network, then forcing it to play catch-up all of a sudden in the last several epochs)
 
-    total_time_seconds = 0.
+    train_time, eval_time = 0., RollingAverage()
     current_steps = 0.
 
     # TODO: Doesn't currently account for partial epochs really (since we're not doing "real" epochs across the whole batchsize)....
@@ -157,20 +168,25 @@ def main():
 
             ender.record() # type: ignore
             torch.cuda.synchronize()
-            total_time_seconds += 1e-3 * starter.elapsed_time(ender)
+            train_time += 1e-3 * starter.elapsed_time(ender)
 
-            val_loss, val_acc, ema_val_acc = evaluate(net, net_ema, data, hyp['eval_batchsize'], epoch, loss_fn, ema_epoch_start)
+            val_loss, val_acc, ema_val_acc, eval_time_s = evaluate(net, net_ema, data, hyp['eval_batchsize'], epoch, loss_fn, ema_epoch_start)
+            eval_time.add(eval_time_s)
 
             # We also check to see if we're in our final epoch so we can print the 'bottom' of the table for each round.
             print_training_details(vars=locals(), is_final_entry=(epoch == hyp['train_epochs'] - 1))
 
     # Return the final ema accuracy achieved (not using the 'best accuracy' selection strategy, which I think is okay here....)
-    return ema_val_acc
+    return ema_val_acc, train_time, eval_time.mean
 
 
 if __name__ == "__main__":
     acc_list = []
+    start_time = timer()
     for run_num in range(1):  # use 25 for final numbers
-        acc_list.append(torch.tensor(main()))
-    print("Mean and variance:", (torch.mean(torch.stack(acc_list)
+        ema_val_acc, train_time, eval_time_mean = main()
+        acc_list.append(torch.tensor(ema_val_acc))
+    print("Mean and variance Acc:", (torch.mean(torch.stack(acc_list)
                                             ).item(), torch.var(torch.stack(acc_list)).item()))
+    print("Eval time/epoch mean(s):", eval_time_mean)
+    print("Wall clock(s):", timer()-start_time)

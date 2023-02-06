@@ -11,7 +11,7 @@ def format_for_table(x, vars): return (f"{vars[x]}".rjust(len(x))) \
     else " "*len(x)
 
 logging_columns_list = ['epoch', 'train_loss', 'val_loss',
-                        'train_acc', 'val_acc', 'ema_val_acc', 'total_time_seconds']
+                        'train_acc', 'val_acc', 'ema_val_acc', 'train_time']
 
 # Print out our training details (sorry for the complexity, the whole logging business here is a bit of a hot mess once the columns need to be aligned and such....)
 # define the printing function and print the column heads
