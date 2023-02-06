@@ -64,11 +64,8 @@ data = get_dataset(hyp['data_cache_location'],
                    hyp['pad_amount'])
 
 
-########################################
-#          Training Helpers            #
-########################################
-
 class NetworkEMA(nn.Module):
+    "Maintains a mirror network whoes weights are kept as moving average of network being trained"
     def __init__(self, net, decay):
         super().__init__()  # init the parent module so this module is registered properly
         self.net_ema = copy.deepcopy(net).eval(
@@ -78,7 +75,7 @@ class NetworkEMA(nn.Module):
 
     def update(self, current_net):
         with torch.no_grad():
-            # potential bug: assumes that the network architectures don't change during training (!!!!)
+            # TODO: potential bug: assumes that the network architectures don't change during training (!!!!)
             for ema_net_parameter, incoming_net_parameter in zip(self.net_ema.state_dict().values(), current_net.state_dict().values()):
                 if incoming_net_parameter.dtype in (torch.half, torch.float):
                     # update the ema values in place, similar to how optimizer momentum is coded
