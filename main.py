@@ -39,7 +39,7 @@ hyp = {
     'data_cache_location': 'data_cache.pt',
     'label_smoothing': 0.2,
     'batchsize': 512,
-    'eval_batchsize': 1000, # eval set size should be divisible by this number
+    'eval_batchsize': 10000, # eval set size should be divisible by this number
 }
 
 batchsize = hyp['batchsize']
