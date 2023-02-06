@@ -1,16 +1,3 @@
-# Note: The one change we need to make if we're in Colab is to uncomment this below block.
-# If we are in an ipython session or a notebook, clear the state to avoid bugs
-"""
-try:
-  _ = get_ipython().__class__.__name__
-  ## we set -f below to avoid prompting the user before clearing the notebook state
-  %reset -f
-except NameError:
-  pass ## we're still good
-"""
-
-
-
 import torch
 torch.backends.cuda.matmul.allow_tf32 = True
 from torch import nn
@@ -41,8 +28,6 @@ from evaluation import evaluate
 # torch.cuda.set_per_process_memory_fraction(fraction=8./40., device=0) ## 40. GB is the maximum memory of the base A100 GPU
 
 
-batchsize = 512
-
 # To replicate the ~95.77% accuracy in 188 seconds runs, simply change the base_depth from 64->128 and the num_epochs from 10->80
 hyp = {
     'ema_start_before_epochs': 2,
@@ -51,10 +36,13 @@ hyp = {
     'train_epochs': 10,
     'pad_amount': 3,
     'device': 'cuda',
-    'data_cache_location': 'data.pt',
+    'data_cache_location': 'data_cache.pt',
     'label_smoothing': 0.2,
+    'batchsize': 512,
     'eval_batchsize': 1000, # eval set size should be divisible by this number
 }
+
+batchsize = hyp['batchsize']
 
 data = get_dataset(hyp['data_cache_location'], hyp['device'], hyp['pad_amount'])
 
@@ -64,12 +52,6 @@ loss_fn = nn.CrossEntropyLoss(label_smoothing=hyp['label_smoothing'], reduction=
 loss_fn.to(hyp['device'])
 
 
-
-########################################
-#           Train and Eval             #
-########################################
-
-
 def train_epoch(net, inputs, targets, epoch_step, opt_sched):
     train_acc, train_loss = None, None
 
@@ -77,7 +59,7 @@ def train_epoch(net, inputs, targets, epoch_step, opt_sched):
     outputs = net(inputs)
 
     # Hardcoded for now, preserves some accuracy during the loss summing process, balancing out its regularization effects
-    loss_scale_scaler = 1./16
+    loss_scale_scaler = 1./(batchsize/32.0)
     # If you want to add other losses or hack around with the loss, you can do that here.
     # Note, as noted in the original blog posts, the summing here does a kind of loss scaling
     loss = loss_fn(outputs, targets).mul(
