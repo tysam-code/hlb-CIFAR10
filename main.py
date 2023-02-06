@@ -94,8 +94,12 @@ def main():
     num_steps_per_epoch = len(data['train']['images']) // batchsize
     total_train_steps = num_steps_per_epoch * hyp['train_epochs']
     ema_epoch_start = hyp['train_epochs'] - hyp['ema_start_before_epochs']
-    num_cooldown_before_freeze_steps = 0
     num_low_lr_steps_for_ema = hyp['ema_start_before_epochs'] * num_steps_per_epoch
+
+    print('train size:', len(data['train']['images']))
+    print('eval size:', len(data['eval']['images']))
+    print('num_steps_per_epoch:', num_steps_per_epoch)
+
 
     # Get network
     net = make_net(data,
@@ -145,11 +149,11 @@ def main():
                 current_steps += 1
 
                 if epoch >= ema_epoch_start and current_steps % hyp['ema_steps'] == 0:
-                    # Initialize the ema from the network at this point in time if it does not already exist.... :D
-                    if net_ema is None or epoch_step < num_cooldown_before_freeze_steps:  # don't snapshot the network yet if so!
+                    # at each ema steps init or update moving average
+                    if net_ema is None:
                         net_ema = NetworkEMA(net, hyp['ema_steps'])
-                        continue
-                    net_ema.update(net)
+                    else:
+                        net_ema.update(net)
 
             ender.record() # type: ignore
             torch.cuda.synchronize()
