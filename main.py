@@ -22,6 +22,7 @@ from torch import nn
 from network import make_net
 from dataset import get_dataset, get_batches
 from opt_sched import OptSched
+from ema import NetworkEMA
 
 # <-- teaching comments
 # <-- functional comments
@@ -46,11 +47,8 @@ batchsize = 512
 
 # To replicate the ~95.77% accuracy in 188 seconds runs, simply change the base_depth from 64->128 and the num_epochs from 10->80
 hyp = {
-    'ema': {
-        'epochs': 2,
-        'decay_base': .986,
-        'every_n_steps': 2,
-    },
+    'ema_start_before_epochs': 2,
+    'ema_steps': 2,
     'scaling_factor': 1./10,
     'train_epochs': 10,
     'device': 'cuda',
@@ -62,29 +60,6 @@ hyp = {
 data = get_dataset(hyp['data_cache_location'],
                    hyp['device'],
                    hyp['pad_amount'])
-
-
-class NetworkEMA(nn.Module):
-    "Maintains a mirror network whoes weights are kept as moving average of network being trained"
-    def __init__(self, net, decay):
-        super().__init__()  # init the parent module so this module is registered properly
-        self.net_ema = copy.deepcopy(net).eval(
-        ).requires_grad_(False)  # copy the model
-        # you can update/hack this as necessary for update scheduling purposes :3
-        self.decay = decay
-
-    def update(self, current_net):
-        with torch.no_grad():
-            # TODO: potential bug: assumes that the network architectures don't change during training (!!!!)
-            for ema_net_parameter, incoming_net_parameter in zip(self.net_ema.state_dict().values(), current_net.state_dict().values()):
-                if incoming_net_parameter.dtype in (torch.half, torch.float):
-                    # update the ema values in place, similar to how optimizer momentum is coded
-                    ema_net_parameter.mul_(self.decay).add_(
-                        incoming_net_parameter.detach().mul(1. - self.decay))
-
-    def forward(self, inputs):
-        with torch.no_grad():
-            return self.net_ema(inputs)
 
 
 # Hey look, it's the soft-targets/label-smoothed loss! Native to PyTorch. Now, _that_ is pretty cool, and simplifies things a lot, to boot! :D :)
@@ -162,16 +137,9 @@ def main():
     # TODO: Doesn't currently account for partial epochs really (since we're not doing "real" epochs across the whole batchsize)....
     num_steps_per_epoch = len(data['train']['images']) // batchsize
     total_train_steps = num_steps_per_epoch * hyp['train_epochs']
-    ema_epoch_start = hyp['train_epochs'] - \
-        hyp['ema']['epochs']
+    ema_epoch_start = hyp['train_epochs'] - hyp['ema_start_before_epochs']
     num_cooldown_before_freeze_steps = 0
-    num_low_lr_steps_for_ema = hyp['ema']['epochs'] * \
-        num_steps_per_epoch
-
-    # I believe this wasn't logged, but the EMA update power is adjusted by being raised to the power of the number of "every n" steps
-    # to somewhat accomodate for whatever the expected information intake rate is. The tradeoff I believe, though, is that this is to some degree noisier as we
-    # are intaking fewer samples of our distribution-over-time, with a higher individual weight each. This can be good or bad depending upon what we want.
-    projected_ema_decay_val = hyp['ema']['decay_base'] ** hyp['ema']['every_n_steps']
+    num_low_lr_steps_for_ema = hyp['ema_start_before_epochs'] * num_steps_per_epoch
 
     # Get network
     net = make_net(data,
@@ -218,11 +186,10 @@ def main():
 
                 current_steps += 1
 
-                if epoch >= ema_epoch_start and current_steps % hyp['ema']['every_n_steps'] == 0:
+                if epoch >= ema_epoch_start and current_steps % hyp['ema_steps'] == 0:
                     # Initialize the ema from the network at this point in time if it does not already exist.... :D
                     if net_ema is None or epoch_step < num_cooldown_before_freeze_steps:  # don't snapshot the network yet if so!
-                        net_ema = NetworkEMA(
-                            net, decay=projected_ema_decay_val)
+                        net_ema = NetworkEMA(net, hyp['ema_steps'])
                         continue
                     net_ema.update(net)
 
