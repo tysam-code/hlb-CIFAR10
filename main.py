@@ -25,7 +25,7 @@ from torchvision import transforms
 # You can run 'sed -i.bak '/\#\#/d' ./main.py' to remove the teaching comments if they are in the way of your work. <3
 
 # This can go either way in terms of actually being helpful when it comes to execution speed.
-# torch.backends.cudnn.benchmark = True
+#torch.backends.cudnn.benchmark = True
 
 # This code was built from the ground up to be directly hackable and to support rapid experimentation, which is something you might see
 # reflected in what would otherwise seem to be odd design decisions. It also means that maybe some cleaning up is required before moving
@@ -34,40 +34,41 @@ from torchvision import transforms
 # project! :)
 
 
-# This is for testing that certain changes don't exceed X% portion of the reference GPU (here an A100)
+# This is for testing that certain changes don't exceed some X% portion of the reference GPU (here an A100)
 # so we can help reduce a possibility that future releases don't take away the accessibility of this codebase.
-#torch.cuda.set_per_process_memory_fraction(fraction=8./40., device=0) ## 40. GB is the maximum memory of the base A100 GPU
+#torch.cuda.set_per_process_memory_fraction(fraction=6.5/40., device=0) ## 40. GB is the maximum memory of the base A100 GPU
 
 # set global defaults (in this particular file) for convolutions
 default_conv_kwargs = {'kernel_size': 3, 'padding': 'same', 'bias': False}
 
-batchsize = 512
+batchsize = 1024
 bias_scaler = 32
-# To replicate the ~95.77% accuracy in 188 seconds runs, simply change the base_depth from 64->128 and the num_epochs from 10->80
+# To replicate the ~95.84%-accuracy-in-172-seconds runs, you can change the base_depth from 64->128, num_epochs from 10->90, ['ema'] epochs 9->78, and cutout 0->11
 hyp = {
     'opt': {
-        'bias_lr':        1.15 * 1.35 * 1. * bias_scaler/batchsize, # TODO: How we're expressing this information feels somewhat clunky, is there maybe a better way to do this? :'))))
-        'non_bias_lr':    1.15 * 1.35 * 1. / batchsize,
-        'bias_decay':     .85 * 4.8e-4 * batchsize/bias_scaler,
-        'non_bias_decay': .85 * 4.8e-4 * batchsize,
+        'bias_lr':        2.1 * bias_scaler/512, # TODO: How we're expressing this information feels somewhat clunky, is there maybe a better way to do this? :'))))
+        'non_bias_lr':    2.1 / 512,
+        'bias_decay':     6.45e-4 * batchsize/bias_scaler,
+        'non_bias_decay': 6.45e-4 * batchsize,
         'scaling_factor': 1./10,
-        'percent_start': .2,
+        'percent_start': .15,
+        'loss_scale_scaler': 4., # * Regularizer inside the loss summing (range: ~1/512 - 16+). FP8 should help with this somewhat too, whenever it comes out. :)
     },
     'net': {
         'whitening': {
             'kernel_size': 2,
             'num_examples': 50000,
         },
-        'batch_norm_momentum': .8,
+        'batch_norm_momentum': .8, # Equivalent roughly to updating entirely every step, as momentum for batchnorm is represented in a different way (1 - momentum) due to a quirk of the original paper... ;'((((
         'cutout_size': 0,
-        'pad_amount': 3,
+        'pad_amount': 2,
         'base_depth': 64 ## This should be a factor of 8 in some way to stay tensor core friendly
     },
     'misc': {
         'ema': {
-            'epochs': 2,
-            'decay_base': .986,
-            'every_n_steps': 2,
+            'epochs': 9,
+            'decay_base': .98,
+            'every_n_steps': 5,
         },
         'train_epochs': 10,
         'device': 'cuda',
@@ -80,10 +81,6 @@ hyp = {
 #############################################
 
 if not os.path.exists(hyp['misc']['data_location']):
-        cifar10_mean, cifar10_std = [
-            torch.tensor([0.4913997551666284, 0.48215855929893703, 0.4465309133731618], device=hyp['misc']['device']),
-            torch.tensor([0.24703225141799082, 0.24348516474564, 0.26158783926049628],  device=hyp['misc']['device'])
-        ]
 
         transform = transforms.Compose([
             transforms.ToTensor()])
@@ -102,6 +99,8 @@ if not os.path.exists(hyp['misc']['data_location']):
 
         train_dataset_gpu['images'], train_dataset_gpu['targets'] = [item.to(device=hyp['misc']['device'], non_blocking=True) for item in next(iter(train_dataset_gpu_loader))]
         eval_dataset_gpu['images'],  eval_dataset_gpu['targets']  = [item.to(device=hyp['misc']['device'], non_blocking=True) for item in next(iter(eval_dataset_gpu_loader)) ]
+
+        cifar10_std, cifar10_mean = torch.std_mean(train_dataset_gpu['images'], dim=(0, 2, 3)) # dynamically calculate the std and mean from the data. this shortens the code and should help us adapt to new datasets!
 
         def batch_normalize_images(input_images, mean, std):
             return (input_images - mean.view(1, -1, 1, 1)) / std.view(1, -1, 1, 1)
@@ -161,30 +160,20 @@ class Conv(nn.Conv2d):
 
 # can hack any changes to each residual group that you want directly in here
 class ConvGroup(nn.Module):
-    def __init__(self, channels_in, channels_out, residual, short, pool, se):
+    def __init__(self, channels_in, channels_out, pool):
         super().__init__()
-        self.short = short
-        self.pool = pool # todo: we can condense this later
-        self.se = se
+        self.pool = pool # todo: maybe we can condense this later
 
-        self.residual = residual
         self.channels_in = channels_in
         self.channels_out = channels_out
 
-        self.conv1 = Conv(channels_in, channels_out)
         self.pool1 = nn.MaxPool2d(2)
+        self.conv1 = Conv(channels_in, channels_out)
+        self.conv2 = Conv(channels_out, channels_out)
         self.norm1 = BatchNorm(channels_out)
-        self.activ = nn.GELU()          
+        self.norm2 = BatchNorm(channels_out)
+        self.activ = nn.GELU()
 
-        # note: this has to be flat if we're jitting things.... we just might burn a bit of extra GPU mem if so
-        if not short:
-            self.conv2 = Conv(channels_out, channels_out)
-            self.conv3 = Conv(channels_out, channels_out)
-            self.norm2 = BatchNorm(channels_out)
-            self.norm3 = BatchNorm(channels_out)
-
-            self.se1 = nn.Linear(channels_out, channels_out//16)
-            self.se2 = nn.Linear(channels_out//16, channels_out)
 
     def forward(self, x):
         x = self.conv1(x)
@@ -192,25 +181,14 @@ class ConvGroup(nn.Module):
             x = self.pool1(x)
         x = self.norm1(x)
         x = self.activ(x)
-        if self.short: # layer 2 doesn't necessarily need the residual, so we just return it.
-            return x
         residual = x
-        if self.se:
-            mult = torch.sigmoid(self.se2(self.activ(self.se1(torch.mean(residual, dim=(2,3)))))).unsqueeze(-1).unsqueeze(-1)
         x = self.conv2(x)
         x = self.norm2(x)
-        x = self.activ(x)
-        x = self.conv3(x)
-        if self.se:
-            x = x * mult
-
-        x = self.norm3(x)
         x = self.activ(x)
         x = x + residual # haiku
 
         return x
 
-# Set to 1 for now just to debug a few things....
 class TemperatureScaler(nn.Module):
     def __init__(self, init_val):
         super().__init__()
@@ -237,12 +215,17 @@ class FastGlobalMaxPooling(nn.Module):
 #############################################
 
 def get_patches(x, patch_shape=(3, 3), dtype=torch.float32):
-    # TODO: Annotate
+    # This uses the unfold operation (https://pytorch.org/docs/stable/generated/torch.nn.functional.unfold.html?highlight=unfold#torch.nn.functional.unfold)
+    # to extract a _view_ (i.e., there's no data copied here) of blocks in the input tensor. We have to do it twice -- once horizontally, once vertically. Then
+    # from that, we get our kernel_size*kernel_size patches to later calculate the statistics for the whitening tensor on :D
     c, (h, w) = x.shape[1], patch_shape
     return x.unfold(2,h,1).unfold(3,w,1).transpose(1,3).reshape(-1,c,h,w).to(dtype) # TODO: Annotate?
 
 def get_whitening_parameters(patches):
-    # TODO: Let's annotate this, please! :'D / D':
+    # As a high-level summary, we're basically finding the high-dimensional oval that best fits the data here.
+    # We can then later use this information to map the input information to a nicely distributed sphere, where also
+    # the most significant features of the inputs each have their own axis. This significantly cleans things up for the
+    # rest of the neural network and speeds up training.
     n,c,h,w = patches.shape
     est_covariance = torch.cov(patches.view(n, c*h*w).t())
     eigenvalues, eigenvectors = torch.linalg.eigh(est_covariance, UPLO='U') # this is the same as saying we want our eigenvectors, with the specification that the matrix be an upper triangular matrix (instead of a lower-triangular matrix)
@@ -255,27 +238,29 @@ def init_whitening_conv(layer, train_set=None, num_examples=None, previous_block
             previous_block_data = train_set[:num_examples,:,pad_amount:-pad_amount,pad_amount:-pad_amount] # if it's none, we're at the beginning of our network.
         else:
             previous_block_data = train_set[:num_examples,:,:,:]
+
+    # chunking code to save memory for smaller-memory-size (generally consumer) GPUs
     if whiten_splits is None:
-         previous_block_data_split = [previous_block_data] # list of length 1 so we can reuse the splitting code down below
+         previous_block_data_split = [previous_block_data] # If we're whitening in one go, then put it in a list for simplicity to reuse the logic below
     else:
-         previous_block_data_split = previous_block_data.split(whiten_splits, dim=0)
+         previous_block_data_split = previous_block_data.split(whiten_splits, dim=0) # Otherwise, we split this into different chunks to keep things manageable
 
     eigenvalue_list, eigenvector_list = [], []
     for data_split in previous_block_data_split:
-        eigenvalues, eigenvectors = get_whitening_parameters(get_patches(data_split, patch_shape=layer.weight.data.shape[2:])) # center crop to remove padding
+        eigenvalues, eigenvectors = get_whitening_parameters(get_patches(data_split, patch_shape=layer.weight.data.shape[2:]))
         eigenvalue_list.append(eigenvalues)
         eigenvector_list.append(eigenvectors)
 
     eigenvalues = torch.stack(eigenvalue_list, dim=0).mean(0)
     eigenvectors = torch.stack(eigenvector_list, dim=0).mean(0)
-    # for some reason, the eigenvalues and eigenvectors seem to come out all in float32 for this? ! ?! ?!?!?!? :'(((( </3
+    # i believe the eigenvalues and eigenvectors come out in float32 for this because we implicitly cast it to float32 in the patches function (for numerical stability)
     set_whitening_conv(layer, eigenvalues.to(dtype=layer.weight.dtype), eigenvectors.to(dtype=layer.weight.dtype), freeze=freeze)
     data = layer(previous_block_data.to(dtype=layer.weight.dtype))
     return data
 
 def set_whitening_conv(conv_layer, eigenvalues, eigenvectors, eps=1e-2, freeze=True):
     shape = conv_layer.weight.data.shape
-    conv_layer.weight.data[-eigenvectors.shape[0]:, :, :, :] = (eigenvectors/torch.sqrt(eigenvalues+eps))[-shape[0]:, :, :, :]
+    conv_layer.weight.data[-eigenvectors.shape[0]:, :, :, :] = (eigenvectors/torch.sqrt(eigenvalues+eps))[-shape[0]:, :, :, :] # set the first n filters of the weight data to the top n significant (sorted by importance) filters from the eigenvectors
     ## We don't want to train this, since this is implicitly whitening over the whole dataset
     ## For more info, see David Page's original blogposts (link in the README.md as of this commit.)
     if freeze: 
@@ -288,10 +273,10 @@ def set_whitening_conv(conv_layer, eigenvalues, eigenvectors, eps=1e-2, freeze=T
 
 scaler = 2. ## You can play with this on your own if you want, for the first beta I wanted to keep things simple (for now) and leave it out of the hyperparams dict
 depths = {
-    'init':   round(scaler**-1*hyp['net']['base_depth']), # 64  w/ scaler at base value
-    'block1': round(scaler**1*hyp['net']['base_depth']), # 128 w/ scaler at base value
-    'block2': round(scaler**2*hyp['net']['base_depth']), # 256 w/ scaler at base value
-    'block3': round(scaler**3*hyp['net']['base_depth']), # 512 w/ scaler at base value
+    'init':   round(scaler**-1*hyp['net']['base_depth']), # 32  w/ scaler at base value
+    'block1': round(scaler** 1*hyp['net']['base_depth']), # 128 w/ scaler at base value
+    'block2': round(scaler** 2*hyp['net']['base_depth']), # 256 w/ scaler at base value
+    'block3': round(scaler** 3*hyp['net']['base_depth']), # 512 w/ scaler at base value
     'num_classes': 10
 }
 
@@ -331,9 +316,9 @@ def make_net():
             'norm': BatchNorm(depths['init'], weight=False),
             'activation': nn.GELU(),
         }),
-        'residual1': ConvGroup(depths['init'], depths['block1'], residual=True, short=False, pool=True, se=True),
-        'residual2': ConvGroup(depths['block1'], depths['block2'], residual=True, short=True, pool=True, se=True),
-        'residual3': ConvGroup(depths['block2'], depths['block3'], residual=True, short=False, pool=True, se=True),
+        'residual1': ConvGroup(depths['init'],   depths['block1'], pool=True),
+        'residual2': ConvGroup(depths['block1'], depths['block2'], pool=True),
+        'residual3': ConvGroup(depths['block2'], depths['block3'], pool=True),
         'pooling': FastGlobalMaxPooling(),
         'linear': nn.Linear(depths['block3'], depths['num_classes'], bias=False),
         'temperature': TemperatureScaler(hyp['opt']['scaling_factor'])
@@ -421,9 +406,11 @@ class NetworkEMA(nn.Module):
 
     def update(self, current_net):
         with torch.no_grad():
-            for ema_net_parameter, incoming_net_parameter in zip(self.net_ema.state_dict().values(), current_net.state_dict().values()): # potential bug: assumes that the network architectures don't change during training (!!!!)
+            for ema_net_parameter, (parameter_name, incoming_net_parameter) in zip(self.net_ema.state_dict().values(), current_net.state_dict().items()): # potential bug: assumes that the network architectures don't change during training (!!!!)
                 if incoming_net_parameter.dtype in (torch.half, torch.float):
                     ema_net_parameter.mul_(self.decay).add_(incoming_net_parameter.detach().mul(1. - self.decay)) # update the ema values in place, similar to how optimizer momentum is coded
+                    if not 'running' in parameter_name:
+                        incoming_net_parameter = ema_net_parameter.detach()
 
     def forward(self, inputs):
         with torch.no_grad():
@@ -501,7 +488,7 @@ def main():
 
     total_time_seconds = 0.
     current_steps = 0.
-    
+
     # TODO: Doesn't currently account for partial epochs really (since we're not doing "real" epochs across the whole batchsize)....
     num_steps_per_epoch      = len(data['train']['images']) // batchsize
     total_train_steps        = num_steps_per_epoch * hyp['misc']['train_epochs']
@@ -515,7 +502,7 @@ def main():
     projected_ema_decay_val  = hyp['misc']['ema']['decay_base'] ** hyp['misc']['ema']['every_n_steps']
 
     # Adjust pct_start based upon how many epochs we need to finetune the ema at a low lr for
-    pct_start = hyp['opt']['percent_start'] * (total_train_steps/(total_train_steps - num_low_lr_steps_for_ema))
+    pct_start = hyp['opt']['percent_start'] #* (total_train_steps/(total_train_steps - num_low_lr_steps_for_ema))
 
     # Get network
     net = make_net()
@@ -527,23 +514,16 @@ def main():
     opt = torch.optim.SGD(**non_bias_params)
     opt_bias = torch.optim.SGD(**bias_params)
 
-    #opt = torch.optim.SGD(**non_bias_params)
-    #opt_bias = torch.optim.SGD(**bias_params)
-
     ## Not the most intuitive, but this basically takes us from ~0 to max_lr at the point pct_start, then down to .1 * max_lr at the end (since 1e16 * 1e-15 = .1 --
     ##   This quirk is because the final lr value is calculated from the starting lr value and not from the maximum lr value set during training)
     initial_div_factor = 1e16 # basically to make the initial lr ~0 or so :D
-    final_lr_ratio = .135
-    lr_sched      = torch.optim.lr_scheduler.OneCycleLR(opt,  max_lr=non_bias_params['lr'], pct_start=pct_start, div_factor=initial_div_factor, final_div_factor=1./(initial_div_factor*final_lr_ratio), total_steps=total_train_steps-num_low_lr_steps_for_ema, anneal_strategy='linear', cycle_momentum=False)
-    lr_sched_bias = torch.optim.lr_scheduler.OneCycleLR(opt_bias, max_lr=bias_params['lr'], pct_start=pct_start, div_factor=initial_div_factor, final_div_factor=1./(initial_div_factor*final_lr_ratio), total_steps=total_train_steps-num_low_lr_steps_for_ema, anneal_strategy='linear', cycle_momentum=False)
+    lr_sched      = torch.optim.lr_scheduler.OneCycleLR(opt,  max_lr=non_bias_params['lr'], pct_start=pct_start, div_factor=initial_div_factor, final_div_factor=1./(initial_div_factor*1e-24), total_steps=total_train_steps, anneal_strategy='linear', cycle_momentum=False)
+    lr_sched_bias = torch.optim.lr_scheduler.OneCycleLR(opt_bias, max_lr=bias_params['lr'], pct_start=pct_start, div_factor=initial_div_factor, final_div_factor=1./(initial_div_factor*1e-24), total_steps=total_train_steps, anneal_strategy='linear', cycle_momentum=False)
 
     ## For accurately timing GPU code
     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-    ## There's another repository that's mainly reorganized David's code while still maintaining some of the functional structure, and it
-    ## has a timing feature too, but there's no synchronizes so I suspect the times reported are much faster than they may be in actuality
-    ## due to some of the quirks of timing GPU operations.
     torch.cuda.synchronize() ## clean up any pre-net setup operations
-    
+
 
     if True: ## Sometimes we need a conditional/for loop here, this is placed to save the trouble of needing to indent
         for epoch in range(hyp['misc']['train_epochs']):
@@ -561,15 +541,15 @@ def main():
               ## Run everything through the network
               outputs = net(inputs)
               
-              loss_scale_scaler = 1./16 # Hardcoded for now, preserves some accuracy during the loss summing process, balancing out its regularization effects
+              loss_batchsize_scaler = 512/batchsize # to scale to keep things at a relatively similar amount of regularization when we change our batchsize since we're summing over the whole batch
               ## If you want to add other losses or hack around with the loss, you can do that here.
-              loss = loss_fn(outputs, targets).mul(loss_scale_scaler).sum().div(loss_scale_scaler) ## Note, as noted in the original blog posts, the summing here does a kind of loss scaling
+              loss = loss_fn(outputs, targets).mul(hyp['opt']['loss_scale_scaler']*loss_batchsize_scaler).sum().div(hyp['opt']['loss_scale_scaler']) ## Note, as noted in the original blog posts, the summing here does a kind of loss scaling
                                                      ## (and is thus batchsize dependent as a result). This can be somewhat good or bad, depending...
 
               # we only take the last-saved accs and losses from train
               if epoch_step % 50 == 0:
                   train_acc = (outputs.detach().argmax(-1) == targets).float().mean().item()
-                  train_loss = loss.detach().cpu().item()/batchsize
+                  train_loss = loss.detach().cpu().item()/(batchsize*loss_batchsize_scaler)
 
               loss.backward()
 
@@ -577,10 +557,9 @@ def main():
               opt.step()
               opt_bias.step()
 
-              if current_steps < total_train_steps - num_low_lr_steps_for_ema - 1: # the '-1' is because the lr scheduler tends to overshoot (even below 0 if the final lr is ~0) on the last step for some reason.
-                  # We only want to step the lr_schedulers while we have training steps to consume. Otherwise we get a not-so-friendly error from PyTorch
-                  lr_sched.step()
-                  lr_sched_bias.step()
+              # We only want to step the lr_schedulers while we have training steps to consume. Otherwise we get a not-so-friendly error from PyTorch
+              lr_sched.step()
+              lr_sched_bias.step()
 
               ## Using 'set_to_none' I believe is slightly faster (albeit riskier w/ funky gradient update workflows) than under the default 'set to zero' method
               opt.zero_grad(set_to_none=True)
@@ -633,7 +612,9 @@ def main():
           # Print out our training details (sorry for the complexity, the whole logging business here is a bit of a hot mess once the columns need to be aligned and such....)
           ## We also check to see if we're in our final epoch so we can print the 'bottom' of the table for each round.
           print_training_details(list(map(partial(format_for_table, locals=locals()), logging_columns_list)), is_final_entry=(epoch == hyp['misc']['train_epochs'] - 1))
-    return ema_val_acc # Return the final ema accuracy achieved (not using the 'best accuracy' selection strategy, which I think is okay here....)
+    return val_acc # Return the final non-ema accuracy achieved (not using the 'best accuracy' selection strategy, which I think is okay here....)
+                   # Note: For longer runs with much larer models, you may want to switch to the 'val_ema_acc' metric. This is because
+                   # that metric does much better outside of these extremely rapid training runs.
 
 if __name__ == "__main__":
     acc_list = []
