@@ -150,7 +150,7 @@ def main():
             # train_epoch_compiled = torch.compile(train_epoch)
 
             for epoch_step, (inputs, targets) in enumerate(
-                    get_batches(data, key='train', batchsize=batchsize, memory_format=hyp['memory_format'])):
+                    get_batches(data, key='train', batchsize=batchsize, device=hyp['device'], memory_format=hyp['memory_format'])):
                 train_acc_e, train_loss_e = train_epoch(
                     net, inputs, targets, epoch_step, opt_sched)
                 train_acc, train_loss = train_acc_e or train_acc, train_loss_e or train_loss
@@ -174,7 +174,7 @@ def main():
 
             val_loss, val_acc, ema_val_acc, eval_time_s = \
                 evaluate(net, net_ema, data, hyp['eval_batchsize'],
-                         epoch, loss_fn, ema_epoch_start, memory_format=hyp['memory_format'])
+                         epoch, loss_fn, ema_epoch_start, device=hyp['device'], memory_format=hyp['memory_format'])
             eval_time.add(eval_time_s)
 
             # We also check to see if we're in our final epoch so we can print the 'bottom' of the table for each round.
