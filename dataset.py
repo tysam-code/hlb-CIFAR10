@@ -39,9 +39,9 @@ def get_dataset(data_location, device, pad_amount):
 
         # use the dataloader to get a single batch of all of the dataset items at once.
         train_dataset_gpu_loader = torch.utils.data.DataLoader(cifar10, batch_size=len(cifar10), drop_last=True,
-                                                            shuffle=True, num_workers=2, persistent_workers=is_persistence_workers())
+                                                            shuffle=True, num_workers=4, pin_memory=True, pin_memory_device=device)
         eval_dataset_gpu_loader = torch.utils.data.DataLoader(cifar10_eval, batch_size=len(cifar10_eval), drop_last=True,
-                                                            shuffle=False, num_workers=1, persistent_workers=is_persistence_workers())
+                                                            shuffle=False, num_workers=2, pin_memory=True, pin_memory_device=device)
 
         train_dataset_gpu = {}
         eval_dataset_gpu = {}
