@@ -7,7 +7,7 @@ from torch import nn
 
 from models.speedyresnet import make_net #speedyresnet, tv_models
 from dataset import get_dataset, get_batches
-from opt_sched_exp import OptSched
+from opt_sched_simple import OptSched
 from ema import NetworkEMA
 from logging_utils import print_headers, print_training_details, print_device_info
 from evaluation import evaluate
