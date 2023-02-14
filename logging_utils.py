@@ -1,4 +1,5 @@
 from functools import partial
+import platform
 
 import torch
 
@@ -51,7 +52,7 @@ def print_device_info(device_name):
     print()
     if device.type == 'cuda':
         print(torch.cuda.get_device_name(0))
-        print('Memory Usage:')
-        print('Memory Allocated:', round(torch.cuda.memory_allocated(0)/1024**3,1), 'GB')
-        print('Memory Cached:   ', round(torch.cuda.memory_reserved(0)/1024**3,1), 'GB')
-
+        print('GPU Memory Allocated/Cached:', round(torch.cuda.memory_allocated(0)/1024**3,1), 'GB',
+              "//", round(torch.cuda.memory_reserved(0)/1024**3,1), 'GB')
+    elif device.type == 'cpu':
+        print("CPU: ", platform.processor())
