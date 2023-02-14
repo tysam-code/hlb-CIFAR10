@@ -202,7 +202,7 @@ def set_whitening_conv(conv_layer, eigenvalues, eigenvectors, eps=1e-2, freeze=T
         conv_layer.weight.requires_grad = False
 
 
-def make_net(data, scaling_factor, device, pad_amount):
+def make_net(data, scaling_factor, device, pad_amount, model_name=None):
     # You can play with this on your own if you want, for the first beta I wanted to keep things simple (for now) and leave it out of the hyperparams dict
     kernel_size = hyp['net']['whitening']['kernel_size']
     num_examples = hyp['net']['whitening']['num_examples']

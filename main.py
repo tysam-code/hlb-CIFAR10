@@ -5,7 +5,7 @@ import torch
 torch.backends.cuda.matmul.allow_tf32 = True
 from torch import nn
 
-from models.speedyresnet import make_net #speedyresnet
+from models.tv_models import make_net #speedyresnet
 from dataset import get_dataset, get_batches
 from opt_sched import OptSched
 from ema import NetworkEMA
@@ -118,7 +118,7 @@ def main():
 
 
     # Get network
-    net = make_net(data, hyp['scaling_factor'], hyp['device'], hyp['pad_amount'])
+    net = make_net(data, hyp['scaling_factor'], hyp['device'], hyp['pad_amount'], model_name='resnet18')
     net.to(device=hyp['device'], memory_format=hyp['memory_format'], dtype=hyp['dtype'])
 
     opt_sched = OptSched(batchsize, net, total_train_steps, num_low_lr_steps_for_ema)
