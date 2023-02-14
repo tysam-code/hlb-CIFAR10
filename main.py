@@ -5,9 +5,9 @@ import torch
 torch.backends.cuda.matmul.allow_tf32 = True
 from torch import nn
 
-from models.speedyresnet import make_net #speedyresnet
+from models.speedyresnet import make_net #speedyresnet, tv_models
 from dataset import get_dataset, get_batches
-from opt_sched import OptSched
+from opt_sched_exp import OptSched
 from ema import NetworkEMA
 from logging_utils import print_headers, print_training_details, print_device_info
 from evaluation import evaluate
@@ -188,7 +188,7 @@ if __name__ == "__main__":
     start_time = timer()
 
     acc_list, train_time_list = [], []
-    for run_num in range(3):  # use 25 for final numbers
+    for run_num in range(1):  # use 25 for final numbers
         print("Run:", run_num)
         ema_val_acc, train_time, eval_time_mean = main()
         acc_list.append(torch.tensor(ema_val_acc))
