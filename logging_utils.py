@@ -1,5 +1,6 @@
 from functools import partial
 
+import torch
 
 # We basically need to look up local variables by name so we can have the names, so we can pad to the proper column width.
 # Printing stuff in the terminal can get tricky and this used to use an outside library, but some of the required stuff seemed even
@@ -43,4 +44,14 @@ def print_training_details(columns_list=logging_columns_list, separator_left='| 
 def print_headers():
     # print out the training column heads before we print the actual content for each run.
     print_training_details(column_heads_only=True)
+
+def print_device_info(device_name):
+    device = torch.device(device_name)
+    print('Using device:', device)
+    print()
+    if device.type == 'cuda':
+        print(torch.cuda.get_device_name(0))
+        print('Memory Usage:')
+        print('Memory Allocated:', round(torch.cuda.memory_allocated(0)/1024**3,1), 'GB')
+        print('Memory Cached:   ', round(torch.cuda.memory_reserved(0)/1024**3,1), 'GB')
 

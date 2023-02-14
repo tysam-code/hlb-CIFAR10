@@ -9,7 +9,7 @@ from models.speedyresnet import make_net #speedyresnet
 from dataset import get_dataset, get_batches
 from opt_sched import OptSched
 from ema import NetworkEMA
-from logging_utils import print_headers, print_training_details
+from logging_utils import print_headers, print_training_details, print_device_info
 from evaluation import evaluate
 
 # <-- teaching comments
@@ -185,6 +185,7 @@ def main():
 
 if __name__ == "__main__":
     start_time = timer()
+
     acc_list, train_time_list = [], []
     for run_num in range(3):  # use 25 for final numbers
         print("Run:", run_num)
@@ -194,7 +195,10 @@ if __name__ == "__main__":
 
     acc_list = torch.stack(acc_list)
     train_time_list = torch.stack(train_time_list)
-    print("Mean, StdDev, Min, Max Accuuracy:", (torch.mean(acc_list).item(),
+
+    print_device_info(hyp['device'])
+
+    print("Mean, StdDev, Min, Max Accuracy:", (torch.mean(acc_list).item(),
                                                 torch.std(acc_list).item(),
                                                 torch.min(acc_list).item(),
                                                 torch.max(acc_list).item(),
