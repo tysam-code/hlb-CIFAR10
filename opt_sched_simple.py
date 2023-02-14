@@ -4,8 +4,8 @@ import torch
 class OptSched:
     def __init__(self, batchsize, net, total_train_steps, num_low_lr_steps_for_ema) -> None:
         # One optimizer for the regular network, and one for the biases. This allows us to use the superconvergence onecycle training policy for our networks....
-        self.opt = torch.optim.SGD(net.parameters(), lr=0.0005, weight_decay=0.02)
-        self.lr_sched = torch.optim.lr_scheduler.OneCycleLR(self.opt, max_lr=0.1, total_steps=total_train_steps, pct_start=0.2, anneal_strategy='cos', cycle_momentum=False)
+        self.opt = torch.optim.SGD(net.parameters(), lr=0.0005, weight_decay=0.2)
+        self.lr_sched = torch.optim.lr_scheduler.OneCycleLR(self.opt, max_lr=0.02, total_steps=total_train_steps, pct_start=0.2, anneal_strategy='cos', cycle_momentum=False)
 
     def lr_step(self):
         # We only want to step the lr_schedulers while we have training steps to consume. Otherwise we get a not-so-friendly error from PyTorch
