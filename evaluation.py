@@ -4,7 +4,7 @@ import torch
 
 from dataset import get_batches
 
-def evaluate(net, net_ema, data, eval_batchsize, cur_epoch, loss_fn, ema_epoch_start, memory_format):
+def evaluate(net, net_ema, data, eval_batchsize, cur_epoch, loss_fn, ema_epoch_start, device, memory_format):
     start_time, eval_cuda_time = timer(), 0.
     starter, ender = torch.cuda.Event(
         enable_timing=True), torch.cuda.Event(enable_timing=True)
@@ -17,7 +17,7 @@ def evaluate(net, net_ema, data, eval_batchsize, cur_epoch, loss_fn, ema_epoch_s
     loss_list_val, acc_list, acc_list_ema = [], [], []
 
     with torch.no_grad():
-        for inputs, targets in get_batches(data, key='eval', batchsize=eval_batchsize, memory_format=memory_format):
+        for inputs, targets in get_batches(data, device=device, key='eval', batchsize=eval_batchsize, memory_format=memory_format):
             # collect ema accuracy if this is last few epochs
             if cur_epoch >= ema_epoch_start:
                 outputs = net_ema(inputs)

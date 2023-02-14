@@ -139,9 +139,9 @@ def batch_flip_lr(batch_images, flip_chance=.5):
 
 # TODO: Could we jit this in the (more distant) future? :)
 @torch.no_grad()
-def get_batches(data_dict, key, batchsize, memory_format, cutout_size=hyp['data']['cutout_size']):
+def get_batches(data_dict, key, batchsize, memory_format, device, cutout_size=hyp['data']['cutout_size']):
     num_epoch_examples = len(data_dict[key]['images'])
-    shuffled = torch.randperm(num_epoch_examples, device='cuda')
+    shuffled = torch.randperm(num_epoch_examples, device=device)
     crop_size = 32
     ## Here, we prep the dataset by applying all data augmentations in batches ahead of time before each epoch, then we return an iterator below
     ## that iterates in chunks over with a random derangement (i.e. shuffled indices) of the individual examples. So we get perfectly-shuffled
