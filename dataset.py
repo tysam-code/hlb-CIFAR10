@@ -17,6 +17,9 @@ hyp = {
 def is_windows()->bool:
     return platform.system()=='Windows'
 
+def is_persistence_workers()->bool:
+    return platform.system()!='Windows' or torch.__version__.split('.')[0]!='2'
+
 def get_dataset(data_location, device, pad_amount):
     if not os.path.exists(data_location):
         cifar10_mean, cifar10_std = [
@@ -36,9 +39,9 @@ def get_dataset(data_location, device, pad_amount):
 
         # use the dataloader to get a single batch of all of the dataset items at once.
         train_dataset_gpu_loader = torch.utils.data.DataLoader(cifar10, batch_size=len(cifar10), drop_last=True,
-                                                            shuffle=True, num_workers=2, persistent_workers=is_windows())
+                                                            shuffle=True, num_workers=2, persistent_workers=is_persistence_workers())
         eval_dataset_gpu_loader = torch.utils.data.DataLoader(cifar10_eval, batch_size=len(cifar10_eval), drop_last=True,
-                                                            shuffle=False, num_workers=1, persistent_workers=is_windows())
+                                                            shuffle=False, num_workers=1, persistent_workers=is_persistence_workers())
 
         train_dataset_gpu = {}
         eval_dataset_gpu = {}
