@@ -184,12 +184,27 @@ def main():
 
 
 if __name__ == "__main__":
-    acc_list = []
     start_time = timer()
-    for run_num in range(1):  # use 25 for final numbers
+    acc_list, train_time_list = [], []
+    for run_num in range(3):  # use 25 for final numbers
+        print("Run:", run_num)
         ema_val_acc, train_time, eval_time_mean = main()
         acc_list.append(torch.tensor(ema_val_acc))
-    print("Mean and variance Acc:", (torch.mean(torch.stack(acc_list)
-                                            ).item(), torch.var(torch.stack(acc_list)).item()))
+        train_time_list.append(torch.tensor(train_time))
+
+    acc_list = torch.stack(acc_list)
+    train_time_list = torch.stack(train_time_list)
+    print("Mean, StdDev, Min, Max Accuuracy:", (torch.mean(acc_list).item(),
+                                                torch.std(acc_list).item(),
+                                                torch.min(acc_list).item(),
+                                                torch.max(acc_list).item(),
+                                                ))
+    print("Mean, StdDev, Min, Max Train Time:", (torch.mean(train_time_list).item(),
+                                                 torch.std(train_time_list).item(),
+                                                 torch.min(train_time_list).item(),
+                                                 torch.max(train_time_list).item(),
+                                          ))
+
     print("Eval time/epoch mean(s):", eval_time_mean)
+
     print("Wall clock(s):", timer()-start_time)
