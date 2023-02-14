@@ -1,6 +1,7 @@
 import os
 import functools
 from functools import partial
+import platform
 
 import torch
 import torchvision
@@ -12,6 +13,9 @@ hyp = {
         'cutout_size': 0,
     }
 }
+
+def is_windows()->bool:
+    return platform.system()=='Windows'
 
 def get_dataset(data_location, device, pad_amount):
     if not os.path.exists(data_location):
@@ -32,9 +36,9 @@ def get_dataset(data_location, device, pad_amount):
 
         # use the dataloader to get a single batch of all of the dataset items at once.
         train_dataset_gpu_loader = torch.utils.data.DataLoader(cifar10, batch_size=len(cifar10), drop_last=True,
-                                                            shuffle=True, num_workers=2, persistent_workers=False)
+                                                            shuffle=True, num_workers=2, persistent_workers=is_windows())
         eval_dataset_gpu_loader = torch.utils.data.DataLoader(cifar10_eval, batch_size=len(cifar10_eval), drop_last=True,
-                                                            shuffle=False, num_workers=1, persistent_workers=False)
+                                                            shuffle=False, num_workers=1, persistent_workers=is_windows())
 
         train_dataset_gpu = {}
         eval_dataset_gpu = {}

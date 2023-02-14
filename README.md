@@ -14,14 +14,14 @@ If you're curious, this code is generally Colab friendly (in fact -- most of thi
 
 ### Main
 
-Goals: 
+Goals:
 
 * minimalistic
 * beginner-friendly
 * torch- and python-idiomatic
-* hackable 
+* hackable
 * few external dependencies (currently only torch and torchvision)
-* ~world-record single-GPU training time (this repo holds the current world record at ~<10 seconds on an A100, down from ~18.1 seconds originally). 
+* ~world-record single-GPU training time (this repo holds the current world record at ~<10 seconds on an A100, down from ~18.1 seconds originally).
 * <2 seconds training time in <2 years (yep!)
 
 This is a neural network implementation of a very speedily-training network that originally started as a painstaking reproduction of [David Page's original ultra-fast CIFAR-10 implementation on a single GPU](https://myrtle.ai/learn/how-to-train-your-resnet/), but written nearly from the ground-up to be extremely rapid-experimentation-friendly. Part of the benefit of this is that we now hold the world record for single GPU training speeds on CIFAR10 (under 10 seconds on an A100!!!)
@@ -57,3 +57,7 @@ Currently, submissions to this codebase as a benchmark are closed as we figure o
 #### Bugs & Etc.
 
 If you find a bug, open an issue! L:D If you have a success story, let me know! It helps me understand what works and doesn't more than you might expect -- if I know how this is specifically helping people, that can help me further improve as a developer, as I can keep that in mind when developing other software for people in the future. :D :)
+
+### Baselines
+
+

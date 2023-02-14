@@ -1,10 +1,11 @@
+from multiprocessing import freeze_support
 from timeit import default_timer as timer
 
 import torch
 torch.backends.cuda.matmul.allow_tf32 = True
 from torch import nn
 
-from models.resnet8 import make_net #speedyresnet
+from models.speedyresnet import make_net #speedyresnet
 from dataset import get_dataset, get_batches
 from opt_sched import OptSched
 from ema import NetworkEMA
@@ -94,6 +95,8 @@ class RollingAverage:
         return self.mean
 
 def main():
+    freeze_support()
+
     # Initializing constants for the whole run.
     net_ema = None  # Reset any existing network emas, we want to have _something_ to check for existence so we can initialize the EMA right from where the network is during training
     # (as opposed to initializing the network_ema from the randomly-initialized starter network, then forcing it to play catch-up all of a sudden in the last several epochs)
