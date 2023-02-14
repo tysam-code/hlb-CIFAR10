@@ -39,6 +39,8 @@ hyp = {
     'train_epochs': 10,
     'pad_amount': 3,
     'device': 'cuda',
+    'dtype': torch.float16,
+    'memory_format': torch.channels_last,
     'data_cache_location': 'data_cache.pt',
     'label_smoothing': 0.2,
     'batchsize': 512,
@@ -47,7 +49,7 @@ hyp = {
 
 batchsize = hyp['batchsize']
 
-data = get_dataset(hyp['data_cache_location'], hyp['device'], hyp['pad_amount'])
+data = get_dataset(hyp['data_cache_location'], hyp['device'], hyp['dtype'], hyp['pad_amount'])
 
 
 # Hey look, it's the soft-targets/label-smoothed loss! Native to PyTorch. Now, _that_ is pretty cool, and simplifies things a lot, to boot! :D :)
@@ -116,11 +118,8 @@ def main():
 
 
     # Get network
-    net = make_net(data,
-
-                   hyp['scaling_factor'],
-                   hyp['device'],
-                   hyp['pad_amount'])
+    net = make_net(data, hyp['scaling_factor'], hyp['device'], hyp['pad_amount'])
+    net.to(device=hyp['device'], memory_format=hyp['memory_format'], dtype=hyp['dtype'])
 
     opt_sched = OptSched(batchsize, net, total_train_steps, num_low_lr_steps_for_ema)
 
@@ -151,7 +150,7 @@ def main():
             # train_epoch_compiled = torch.compile(train_epoch)
 
             for epoch_step, (inputs, targets) in enumerate(
-                    get_batches(data, key='train', batchsize=batchsize)):
+                    get_batches(data, key='train', batchsize=batchsize, memory_format=hyp['memory_format'])):
                 train_acc_e, train_loss_e = train_epoch(
                     net, inputs, targets, epoch_step, opt_sched)
                 train_acc, train_loss = train_acc_e or train_acc, train_loss_e or train_loss
@@ -173,7 +172,9 @@ def main():
             torch.cuda.synchronize()
             train_time += 1e-3 * starter.elapsed_time(ender)
 
-            val_loss, val_acc, ema_val_acc, eval_time_s = evaluate(net, net_ema, data, hyp['eval_batchsize'], epoch, loss_fn, ema_epoch_start)
+            val_loss, val_acc, ema_val_acc, eval_time_s = \
+                evaluate(net, net_ema, data, hyp['eval_batchsize'],
+                         epoch, loss_fn, ema_epoch_start, memory_format=hyp['memory_format'])
             eval_time.add(eval_time_s)
 
             # We also check to see if we're in our final epoch so we can print the 'bottom' of the table for each round.

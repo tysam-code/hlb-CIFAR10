@@ -243,12 +243,7 @@ def make_net(data, scaling_factor, device, pad_amount):
     })
 
     net = SpeedyResNet(network_dict)
-    net = net.to(device)
-    # to appropriately use tensor cores/avoid thrash while training
-    net = net.to(memory_format=torch.channels_last)
-    net.train()
-    # Convert network to half before initializing the initial whitening layer.
-    net.half()
+    net = net.to(device=device, dtype=data['train']['images'].dtype)
 
     # Initialize the whitening convolution
     with torch.no_grad():

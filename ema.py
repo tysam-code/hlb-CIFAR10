@@ -29,7 +29,7 @@ class NetworkEMA(nn.Module):
         with torch.no_grad():
             # TODO: potential bug: assumes that the network architectures don't change during training (!!!!)
             for ema_net_parameter, incoming_net_parameter in zip(self.net_ema.state_dict().values(), current_net.state_dict().values()):
-                if incoming_net_parameter.dtype in (torch.half, torch.float):
+                if incoming_net_parameter.dtype in (torch.float32, torch.float16, torch.bfloat16):
                     # update the ema values in place, similar to how optimizer momentum is coded
                     ema_net_parameter.mul_(self.decay).add_(
                         incoming_net_parameter.detach().mul(1. - self.decay))

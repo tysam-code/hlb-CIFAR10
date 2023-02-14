@@ -14,14 +14,17 @@ hyp = {
     }
 }
 
-def is_windows()->bool:
-    return platform.system()=='Windows'
+def get_dataset(data_location, device, dtype, pad_amount):
+    data = None
+    if os.path.exists(data_location):
+        # This is effectively instantaneous, and takes us practically straight to where the dataloader-loaded dataset would be. :)
+        # So as long as you run the above loading process once, and keep the file on the disc it's specified by default in the above
+        # hyp dictionary, then we should be good. :)
+        data = torch.load(data_location)
+        if data['train']['images'].dtype != dtype:
+            data = None
 
-def is_persistence_workers()->bool:
-    return platform.system()!='Windows' or torch.__version__.split('.')[0]!='2'
-
-def get_dataset(data_location, device, pad_amount):
-    if not os.path.exists(data_location):
+    if data is None:
         cifar10_mean, cifar10_std = [
             torch.tensor([0.4913997551666284, 0.48215855929893703,
                         0.4465309133731618], device=device),
@@ -39,9 +42,9 @@ def get_dataset(data_location, device, pad_amount):
 
         # use the dataloader to get a single batch of all of the dataset items at once.
         train_dataset_gpu_loader = torch.utils.data.DataLoader(cifar10, batch_size=len(cifar10), drop_last=True,
-                                                            shuffle=True, num_workers=4, pin_memory=True, pin_memory_device=device)
+                                                            shuffle=True)
         eval_dataset_gpu_loader = torch.utils.data.DataLoader(cifar10_eval, batch_size=len(cifar10_eval), drop_last=True,
-                                                            shuffle=False, num_workers=2, pin_memory=True, pin_memory_device=device)
+                                                            shuffle=False)
 
         train_dataset_gpu = {}
         eval_dataset_gpu = {}
@@ -70,16 +73,10 @@ def get_dataset(data_location, device, pad_amount):
         }
 
         # Convert dataset to FP16 now for the rest of the process....
-        data['train']['images'] = data['train']['images'].half()
-        data['eval']['images'] = data['eval']['images'].half()
+        data['train']['images'] = data['train']['images'].to(dtype=dtype)
+        data['eval']['images'] = data['eval']['images'].to(dtype=dtype)
 
         torch.save(data, data_location)
-
-    else:
-        # This is effectively instantaneous, and takes us practically straight to where the dataloader-loaded dataset would be. :)
-        # So as long as you run the above loading process once, and keep the file on the disc it's specified by default in the above
-        # hyp dictionary, then we should be good. :)
-        data = torch.load(data_location)
 
 
     # As you'll note above and below, one difference is that we don't count loading the raw data to GPU since it's such a variable operation, and can sort of get in the way
@@ -142,7 +139,7 @@ def batch_flip_lr(batch_images, flip_chance=.5):
 
 # TODO: Could we jit this in the (more distant) future? :)
 @torch.no_grad()
-def get_batches(data_dict, key, batchsize, cutout_size=hyp['data']['cutout_size']):
+def get_batches(data_dict, key, batchsize, memory_format, cutout_size=hyp['data']['cutout_size']):
     num_epoch_examples = len(data_dict[key]['images'])
     shuffled = torch.randperm(num_epoch_examples, device='cuda')
     crop_size = 32
@@ -157,7 +154,7 @@ def get_batches(data_dict, key, batchsize, cutout_size=hyp['data']['cutout_size'
         images = data_dict[key]['images']
 
     # Send the images to an (in beta) channels_last to help improve tensor core occupancy (and reduce NCHW <-> NHWC thrash) during training
-    images = images.to(memory_format=torch.channels_last)
+    images = images.to(memory_format=memory_format)
     for idx in range(num_epoch_examples // batchsize):
         if not (idx+1)*batchsize > num_epoch_examples: ## Use the shuffled randperm to assemble individual items into a minibatch
             yield images.index_select(0, shuffled[idx*batchsize:(idx+1)*batchsize]), \
