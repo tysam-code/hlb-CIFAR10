@@ -4,7 +4,7 @@ import torch
 torch.backends.cuda.matmul.allow_tf32 = True
 from torch import nn
 
-from network import make_net
+from models.resnet8 import make_net #speedyresnet
 from dataset import get_dataset, get_batches
 from opt_sched import OptSched
 from ema import NetworkEMA
