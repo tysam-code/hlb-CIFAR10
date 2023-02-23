@@ -14,9 +14,9 @@ jobs:
     - name: Install dependencies
       run: |
         make install
-    - name: Lint
+    - name: Format
       run: |
-        make lint
+        make format
     - name: Code Style
       run: |
         make codestyle
