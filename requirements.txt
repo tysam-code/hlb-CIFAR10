@@ -1,6 +1,6 @@
 torch
 torchvision
-black==19.10
+black
 pylint==2.7.4
 pytest==6.2.3
 pycodestyle==2.6.0
