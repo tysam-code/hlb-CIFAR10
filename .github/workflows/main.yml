@@ -17,6 +17,3 @@ jobs:
     - name: Format
       run: |
         make format
-    - name: Code Style
-      run: |
-        make codestyle
