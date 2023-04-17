@@ -21,16 +21,17 @@ Goals:
 * torch- and python-idiomatic
 * hackable 
 * few external dependencies (currently only torch and torchvision)
-* ~world-record single-GPU training time (this repo holds the current world record at ~<7 (!!) seconds on an A100, down from ~18.1 seconds originally). 
+* ~world-record single-GPU training time (this repo holds the current world record at ~<7 (!!!) seconds on an A100, down from ~18.1 seconds originally).
 * <2 seconds training time in <2 years (yep!)
 
-This is a neural network implementation of a very speedily-training network that originally started as a painstaking reproduction of [David Page's original ultra-fast CIFAR-10 implementation on a single GPU](https://myrtle.ai/learn/how-to-train-your-resnet/), but written nearly from the ground-up to be extremely rapid-experimentation-friendly. Part of the benefit of this is that we now hold the world record for single GPU training speeds on CIFAR10, though it will likely get to be _much_ harder for us to continue to improve our speeds significantly from here on out. 
+This is a neural network implementation of a very speedily-training network that originally started as a painstaking reproduction of [David Page's original ultra-fast CIFAR-10 implementation on a single GPU](https://myrtle.ai/learn/how-to-train-your-resnet/), but written nearly from the ground-up to be extremely rapid-experimentation-friendly. Part of the benefit of this is that we now hold the world record for single GPU training speeds on CIFAR10, for example.
 
 What we've added:
-* squeeze and excite layers
+* custom architecture that is somehow even faster
 * way too much hyperparameter tuning
 * miscellaneous architecture trimmings (see the patch notes)
 * memory format changes (and more!) to better use tensor cores/etc
+* dirac initializations on non-depth-transitional layers (information passthrough on init)
 * and more!
 
 This code, in comparison to David's original code, is in a single file and extremely flat, but is not as durable for long-term production-level bug maintenance. You're meant to check out a fresh repo whenever you have a new idea. It is excellent for rapid idea exploring -- almost everywhere in the pipeline is exposed and built to be user-friendly. I truly enjoy personally using this code, and hope you do as well! :D Please let me know if you have any feedback. I hope to continue publishing updates to this in the future, so your support is encouraged. Share this repo with someone you know that might like it!
