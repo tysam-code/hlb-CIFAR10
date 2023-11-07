@@ -6,8 +6,13 @@ Welcome to the hyperlightspeedbench CIFAR-10 (HLB-CIFAR10) repo.
 ### How to Run
 
 
-`git clone https://github.com/tysam-code/hlb-CIFAR10 && cd hlb-CIFAR10 && python -m pip install -r requirements.txt && python main.py`
+`git clone https://github.com/tysam-code/hlb-CIFAR10 && cd hlb-CIFAR10 && python main.py`
 
+Requires CUDA. Can be modified for other platforms with mild difficulty.
+
+If you don't have torch and/or torchvision installed, please run:
+
+`python -m pip install -r requirements.txt` after cd-ing into the hlb-CIFAR10 folder, then `python main.py` instead.
 
 If you're curious, this code is generally Colab friendly (in fact -- most of this was developed in Colab!). Just be sure to uncomment the reset block at the top of the code.
 

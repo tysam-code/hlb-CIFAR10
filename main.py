@@ -181,7 +181,7 @@ class Linear(nn.Linear):
 
 # can hack any changes to each convolution group that you want directly in here
 class ConvGroup(nn.Module):
-    def __init__(self, channels_in, channels_out):
+    def __init__(self, channels_in, channels_out, norm):
         super().__init__()
         self.channels_in  = channels_in
         self.channels_out = channels_out
